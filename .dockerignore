@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+data/
+tests/
+*.md
+*.ps1
+deploy/

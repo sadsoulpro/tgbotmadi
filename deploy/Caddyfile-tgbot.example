@@ -1,0 +1,4 @@
+# Add this site block to the EXISTING Caddyfile; keep the website's blocks.
+tgbot.madirahman.com {
+    reverse_proxy 127.0.0.1:18080
+}

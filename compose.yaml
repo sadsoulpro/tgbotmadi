@@ -1,0 +1,35 @@
+name: tgbotmadi
+
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: "8080"
+    ports:
+      - "127.0.0.1:${ADMIN_BIND_PORT:-18080}:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/admin/login', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

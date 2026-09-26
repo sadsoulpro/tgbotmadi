@@ -1,0 +1,76 @@
+# Развёртывание на VPS с уже работающим сайтом
+
+Бот работает через Telegram long polling, поэтому публичный webhook для сообщений Telegram не нужен. В `compose.yaml` админка доступна на сервере только через `127.0.0.1:18080`. Существующие 80/443 и конфигурацию сайта Docker Compose не занимает. Для домена `tgbot.madirahman.com` добавляется отдельное правило в уже работающий reverse proxy.
+
+DNS-запись `tgbot.madirahman.com` уже указывает на `46.225.70.253` по проверке 27.09.2026. Перед включением HTTPS проверьте её снова: `dig +short tgbot.madirahman.com`.
+
+## 1. Подготовить сервер
+
+Нужен Linux VPS с Docker Engine и Docker Compose plugin. Узнать, чем обслуживается текущий сайт:
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+sudo ss -ltnp '( sport = :80 or sport = :443 )'
+```
+
+Если Docker отсутствует, установите его по официальной инструкции для вашей ОС. Не меняйте работающие сервисы сайта ради бота.
+
+## 2. Получить код и секреты
+
+```bash
+sudo mkdir -p /opt/tgbotmadi
+sudo chown "$USER":"$USER" /opt/tgbotmadi
+git clone https://github.com/sadsoulpro/tgbotmadi.git /opt/tgbotmadi
+cd /opt/tgbotmadi
+cp .env.example .env
+mkdir -p data
+sudo chown -R 10001:10001 data
+chmod 700 data
+chmod 600 .env
+```
+
+Откройте `.env` на сервере и установите `BOT_TOKEN`, `ADMIN_PASSWORD` и при наличии `BOOKING_URL`, `CONTACT_URL`. Сгенерировать пароль можно командой `openssl rand -base64 32`. Не отправляйте `.env` в Git и не вставляйте токен в команду, которая сохранится в истории терминала. `ADMIN_HOST` и `ADMIN_PORT` можно оставить как в примере: Compose заменит их для контейнера. Порт на стороне сервера по умолчанию `18080`; если занят, добавьте в `.env` строку `ADMIN_BIND_PORT=18081` и измените порт в конфигурации reverse proxy.
+
+Если нужно сохранить уже полученные на локальном компьютере результаты тестов, перенесите `data/bot.sqlite3` и `data/media` на сервер **до первого запуска**. Иначе будет создана новая пустая база. Копируйте SQLite через функцию резервного копирования в админке или `Store.backup`, а не во время записи в файл базы. После переноса снова выполните `sudo chown -R 10001:10001 data`.
+
+## 3. Проверить и запустить
+
+Перед запуском VPS остановите локальный Windows-экземпляр командой `.\stop.ps1` в папке проекта. Одновременно два экземпляра с одним Telegram-токеном запускать нельзя.
+
+На сервере:
+
+```bash
+cd /opt/tgbotmadi
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=50 bot
+curl -fsS http://127.0.0.1:18080/admin/login >/dev/null && echo 'Админка отвечает'
+```
+
+У контейнера должен быть статус `healthy`, в логе — начало Telegram polling. База и загруженные медиа живут в `./data` и сохраняются при пересоздании контейнера.
+
+## 4. Подключить поддомен к существующему сайту
+
+Определите reverse proxy, уже занимающий 80/443. Добавьте **новый** виртуальный хост только для `tgbot.madirahman.com`:
+
+- Если это Nginx на хосте, используйте `deploy/nginx-tgbot.conf.example`, проверьте `sudo nginx -t`, затем перезагрузите Nginx. После этого выдайте HTTPS-сертификат через уже используемый на сервере механизм (пример с Certbot есть в файле).
+- Если это Caddy на хосте, добавьте блок из `deploy/Caddyfile-tgbot.example` в существующий Caddyfile. Caddy получит и обновит HTTPS-сертификат при корректной DNS-записи и доступных 80/443.
+- Если reverse proxy самого сайта работает **в контейнере**, его `127.0.0.1` — не хост VPS. Тогда нужен общий Docker network и адрес контейнера бота `bot:8080` либо иной маршрут, соответствующий текущей схеме сайта. Прежде чем менять сеть существующего сайта, проверьте `docker ps` и его Compose-конфигурацию.
+
+Не публикуйте порт 18080 наружу. Откройте `https://tgbot.madirahman.com/admin/login` и войдите с логином из `.env` (по умолчанию `owner`) и паролем `ADMIN_PASSWORD`.
+
+## 5. Обновление и резервная копия
+
+Обновление:
+
+```bash
+cd /opt/tgbotmadi
+git pull --ff-only origin main
+docker compose up -d --build
+docker compose ps
+```
+
+Для базы используйте кнопку **Выгрузка → Полная резервная копия SQLite** в админке. Отдельно копируйте `data/media` с загруженными через админку файлами. Регулярное резервное копирование этих двух объектов нужно настроить в существующей системе бэкапов сервера.
+
+Проверка после обновления: `docker compose ps`, `docker compose logs --tail=50 bot`, открытие HTTPS-админки и `/continue` в Telegram.
