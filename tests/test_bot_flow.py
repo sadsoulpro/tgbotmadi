@@ -31,6 +31,12 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
                           "https://example.org/book", "", "", tmp_path / "bot.sqlite3", tmp_path / "media")
         store = Store(config.database_path)
+        config.media_dir.mkdir(parents=True)
+        (config.media_dir / "guide.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+        store.execute("INSERT INTO lead_magnets(tag,greeting,bridge,file_path) VALUES(?,?,?,?)",
+                      ("inerciya", "{name}, держи материал.", "Теперь перейдём к диагностике.", "uploads/guide.pdf"))
+        store.execute("INSERT INTO lead_magnets(tag,greeting,bridge,file_path) VALUES(?,?,?,?)",
+                      ("nadryv", "{name}, новый материал.", "Продолжай с сохранённого шага.", "uploads/guide.pdf"))
         bot = FakeBot()
         dispatcher = Dispatcher()
         dispatcher.include_router(create_router(store, config))
@@ -56,8 +62,12 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
 
         await message("/start inerciya")
         assert store.user(42)["source"] == "inerciya"
+        assert [call.__class__.__name__ for call in bot.calls[:4]] == [
+            "SendMessage", "SendDocument", "SendMessage", "SendMessage"]
+        assert sum(1 for call in bot.calls[:4] if isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)) == 1
         await click("begin")
         first = store.user(42)["current_run"]
+        assert store.one("SELECT source FROM runs WHERE id=?", (first,))["source"] == "inerciya"
         for part in range(1, 8):
             assert store.user(42)["current_part"] == part
             if part >= 4:
@@ -65,6 +75,14 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
             if part < 7:
                 await click(f"next:{first}:{part}")
         assert store.user(42)["stage"] == "result"
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='step_sent'")["n"] == 7
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='step_advanced'")["n"] == 6
+        assert any("Следующие части серии пока готовятся" in (getattr(call, "text", "") or "") for call in bot.calls)
+        assert not any(
+            isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
+            and any(button.text == "Слушать дальше" for row in call.reply_markup.inline_keyboard for button in row)
+            for call in bot.calls
+        )
         assert store.one("SELECT variant FROM runs WHERE id=?", (first,))["variant"] == "B2"
         assert any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
@@ -72,6 +90,9 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
             for call in bot.calls
         )
         assert any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
+        await click(f"booking:result:{first}")
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='booking_requested'")["n"] == 1
+        assert store.one("SELECT booked_at FROM runs WHERE id=?", (first,))["booked_at"] is None
         await click(f"edit:list:{first}")
         await click(f"edit:{first}:4")
         await click(f"score:{first}:4:1")
@@ -79,6 +100,11 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         assert store.one("SELECT variant FROM runs WHERE id=?", (first,))["variant"] == "A1"
         await message("/start nadryv")
         assert store.user(42)["source"] == "inerciya"
+        assert bot.calls[-3].__class__.__name__ == "SendDocument"
+        assert store.user(42)["stage"] == "result"
+        await click("begin")
+        assert store.user(42)["current_run"] == first
+        assert store.one("SELECT source FROM runs WHERE id=?", (first,))["source"] == "inerciya"
         store.execute("INSERT INTO parts(position,title,intro,kind,prompt,enabled) VALUES(8,'Роли','Роли','text_answer','Назови роли',1)")
         await click(f"continue:result:{first}")
         assert store.user(42)["stage"] == "text_answer"
@@ -87,6 +113,7 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         await message("/restart")
         assert store.user(42)["current_run"] != first
         second = store.user(42)["current_run"]
+        assert store.one("SELECT source FROM runs WHERE id=?", (second,))["source"] == "nadryv"
         new_calls = len(bot.calls)
         assert store.scores(first)["spiritual"] == 1
         await click(f"next:{first}:1")

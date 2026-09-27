@@ -72,7 +72,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
 
     def page(title: str, body: str) -> HTMLResponse:
         nav = ' '.join(f'<a href="{url}">{name}</a>' for name, url in [
-            ("Обзор", "/admin"), ("Части", "/admin/parts"), ("Тексты", "/admin/texts"),
+            ("Обзор", "/admin"), ("Части", "/admin/parts"),
+            ("Лид-магниты", "/admin/lead-magnets"), ("Тексты", "/admin/texts"),
             ("Правила", "/admin/rules"), ("Настройки", "/admin/options"),
             ("Пользователи", "/admin/users"), ("Выгрузка", "/admin/export"), ("Выйти", "/admin/logout"),
         ])
@@ -126,16 +127,17 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         parts = store.parts()
         funnel = [("Запустил бота", total)]
         for part in parts:
-            n = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='audio_opened' AND part=?", (part["position"],))["n"]
-            funnel.append((f"Открыл часть {part['position']} — {part['title']}", n))
-            if part["position"] < 7:
-                advanced = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='part_next' AND part=?", (part["position"],))["n"]
-                funnel.append((f"Перешёл после части {part['position']}", advanced))
+            n = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='step_sent' AND part=?", (part["position"],))["n"]
+            funnel.append((f"Отправлено на шаге {part['position']} — {part['title']}", n))
+            if part["position"] < parts[-1]["position"]:
+                advanced = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='step_advanced' AND part=?", (part["position"],))["n"]
+                funnel.append((f"Перешёл на шаг {part['position'] + 1}", advanced))
+                funnel.append((f"Не перешёл после шага {part['position']}", max(0, n - advanced)))
         for label, sql in [
             ("Получил результат", "SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='result'"),
             ("Оставил телефон", "SELECT COUNT(*) AS n FROM users WHERE phone IS NOT NULL"),
-            ("Нажал запись", "SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='booking_clicked'"),
-            ("Записался", "SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE booked_at IS NOT NULL"),
+            ("Запросил ссылку записи", "SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='booking_requested'"),
+            ("Запись подтверждена", "SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE booked_at IS NOT NULL"),
         ]:
             funnel.append((label, store.one(sql)["n"]))
         rows = "".join(f'<tr><td>{esc(label)}</td><td>{count}</td></tr>' for label, count in funnel)
@@ -143,7 +145,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             COUNT(*) AS total,
             SUM(CASE WHEN EXISTS(SELECT 1 FROM events e WHERE e.telegram_id=u.telegram_id AND e.kind='result') THEN 1 ELSE 0 END) AS results,
             SUM(CASE WHEN u.phone IS NOT NULL THEN 1 ELSE 0 END) AS phones,
-            SUM(CASE WHEN EXISTS(SELECT 1 FROM events e WHERE e.telegram_id=u.telegram_id AND e.kind='booking_clicked') THEN 1 ELSE 0 END) AS booking_clicks
+            SUM(CASE WHEN EXISTS(SELECT 1 FROM events e WHERE e.telegram_id=u.telegram_id AND e.kind='booking_requested') THEN 1 ELSE 0 END) AS booking_clicks
             FROM users u GROUP BY u.source ORDER BY total DESC""")
         source = "".join(f'<tr><td>{esc(r["source"])}</td><td>{r["total"]}</td><td>{r["results"]}</td><td>{r["phones"]}</td><td>{r["booking_clicks"]}</td></tr>' for r in source_rows)
         source_part_rows = []
@@ -152,7 +154,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             cells = []
             for part in parts:
                 count = store.one("""SELECT COUNT(DISTINCT e.telegram_id) AS n FROM events e JOIN users u ON u.telegram_id=e.telegram_id
-                    WHERE e.kind='audio_opened' AND e.part=? AND u.source IS ?""", (part["position"], key))["n"]
+                    WHERE e.kind='step_sent' AND e.part=? AND u.source IS ?""", (part["position"], key))["n"]
                 cells.append(f"<td>{count}</td>")
             source_part_rows.append(f'<tr><td>{esc(src["source"])}</td><td>{src["total"]}</td>{"".join(cells)}<td>{src["results"]}</td></tr>')
         variants = store.all("SELECT variant,COUNT(*) AS n FROM runs WHERE variant IS NOT NULL GROUP BY variant ORDER BY variant")
@@ -163,14 +165,25 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             SELECT DISTINCT e.run_id,e.part FROM events e
             JOIN parts p ON p.position=e.part AND p.sphere IS NOT NULL
             LEFT JOIN scores s ON s.run_id=e.run_id AND s.sphere=p.sphere
-            WHERE e.kind='audio_opened' AND s.run_id IS NULL
+            WHERE e.kind='step_sent' AND s.run_id IS NULL
         )""")["n"]
-        asked = store.one("""SELECT COUNT(*) AS n FROM (SELECT DISTINCT e.run_id,e.part FROM events e JOIN parts p ON p.position=e.part AND p.sphere IS NOT NULL WHERE e.kind='audio_opened')""")["n"]
+        asked = store.one("""SELECT COUNT(*) AS n FROM (SELECT DISTINCT e.run_id,e.part FROM events e JOIN parts p ON p.position=e.part AND p.sphere IS NOT NULL WHERE e.kind='step_sent')""")["n"]
         percent = round(100 * unanswered / asked, 1) if asked else 0
         body = f'<div class="grid">{cards}<div class="metric">Не ответили после аудио<b>{unanswered}/{asked} ({percent}%)</b></div></div>'
-        body += '<article><h3>Воронка</h3><small>Telegram не сообщает факт прослушивания: «открыл часть» означает доставку аудио.</small><table><tr><th>Шаг</th><th>Люди</th></tr>' + rows + '</table></article>'
-        body += '<article><h3>Источники</h3><table><tr><th>Метка</th><th>Всего</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>' + source + '</table></article>'
+        body += '<article><h3>Воронка</h3><small>«Отправлено» — бот отправил материал шага. «Перешёл» — человек нажал переход дальше. Разница показывает отвал на шаге, но не причину. Telegram не сообщает факт прослушивания.</small><table><tr><th>Шаг</th><th>Люди</th></tr>' + rows + '</table></article>'
+        body += '<article><h3>Источники первого входа</h3><table><tr><th>Метка</th><th>Всего</th><th>Результат</th><th>Телефон</th><th>Запросили ссылку записи</th></tr>' + source + '</table></article>'
         body += '<article><h3>Воронка по источникам</h3><table><tr><th>Метка</th><th>Старт</th>' + ''.join(f'<th>Часть {p["position"]}</th>' for p in parts) + '<th>Результат</th></tr>' + ''.join(source_part_rows) + '</table></article>'
+        tags = store.all("""SELECT tag FROM lead_magnets UNION SELECT detail AS tag FROM events
+            WHERE kind='start' AND detail IS NOT NULL AND detail!='' ORDER BY tag""")
+        tag_rows = ""
+        for row in tags:
+            tag = row["tag"]
+            visits = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='start' AND detail=?", (tag,))["n"]
+            started = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=?", (tag,))["n"]
+            results = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=? AND completed_at IS NOT NULL", (tag,))["n"]
+            bookings = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=? AND booked_at IS NOT NULL", (tag,))["n"]
+            tag_rows += f"<tr><td>{esc(tag)}</td><td>{visits}</td><td>{started}</td><td>{results}</td><td>{bookings}</td></tr>"
+        body += '<article><h3>Лид-магниты и теги</h3><small>«Пришли» — уникальные люди по каждому тегу. Диагностика и результат относятся к тегу последнего входа перед началом прохождения. Повторный вход после начала прохождения не переносит его в другой тег.</small><table><tr><th>Тег</th><th>Пришли</th><th>Начали</th><th>Результат</th><th>Записались</th></tr>' + tag_rows + '</table></article>'
         body += '<article><h3>Варианты</h3><table>' + variant_html + '</table></article>'
         body += '<article><h3>Распределение оценок</h3><table><tr><th>Сфера</th><th>Оценка</th><th>Количество</th></tr>' + scores_html + '</table></article>'
         return page("Обзор", body)
@@ -277,6 +290,116 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             store.execute(f"UPDATE parts SET {'audio_path' if field=='audio' else 'image_path'}=? WHERE id=?", ("uploads/" + name, pid))
         return RedirectResponse("/admin/parts", status_code=303)
 
+    def save_lead(tag: str, data) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tag):
+            raise HTTPException(400, "Тег: латиница, цифры, _ или -, до 64 символов")
+        greeting = str(data.get("greeting", "")).strip()[:3000]
+        bridge = str(data.get("bridge", "")).strip()[:3000]
+        if not greeting or not bridge:
+            raise HTTPException(400, "Укажите приветствие и фразу-переход")
+        try:
+            fields = [field for _, field, _, _ in string.Formatter().parse(greeting) if field]
+            if any(field != "name" for field in fields):
+                raise ValueError
+            greeting.format(name="Иван")
+        except (ValueError, KeyError, IndexError):
+            raise HTTPException(400, "В приветствии допустима только переменная {name}")
+        url = str(data.get("file_url", "")).strip()[:2048]
+        if url and not re.fullmatch(r"https://[^\s]+", url):
+            raise HTTPException(400, "Ссылка на файл должна начинаться с https://")
+        kind = str(data.get("file_kind", "document"))
+        if kind not in {"document", "image"}:
+            raise HTTPException(400, "Неизвестный тип файла")
+        old = store.one("SELECT file_path,file_url FROM lead_magnets WHERE tag=?", (tag,))
+        file_path = None if "remove_file" in data or url else old["file_path"] if old else None
+        if "remove_file" in data:
+            url = ""
+        elif not url and old:
+            url = old["file_url"] or ""
+        store.execute("""INSERT INTO lead_magnets(tag,greeting,bridge,file_path,file_url,file_kind,enabled)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(tag) DO UPDATE SET greeting=excluded.greeting,
+            bridge=excluded.bridge,file_path=excluded.file_path,file_url=excluded.file_url,
+            file_kind=excluded.file_kind,enabled=excluded.enabled""",
+            (tag, greeting, bridge, file_path, url or None, kind, int("enabled" in data)))
+
+    @app.get("/admin/lead-magnets")
+    async def lead_magnets(request: Request):
+        auth(request)
+        body = '<p>Новых материалов пока нет: бот показывает обычное приветствие. Добавьте тег, приветствие и фразу-переход; файл необязателен. После материала бот покажет общее приветствие с одной кнопкой.</p>'
+        for lead in store.all("SELECT * FROM lead_magnets ORDER BY tag"):
+            tag = esc(lead["tag"])
+            kind = lead["file_kind"]
+            body += f'''<article><h3>{tag}</h3><form method="post" action="/admin/lead-magnets/{tag}">{hidden()}
+                <label>Приветствие (можно {{name}})<textarea name="greeting" rows="3" required>{esc(lead['greeting'])}</textarea></label>
+                <label>Фраза-переход к диагностике<textarea name="bridge" rows="3" required>{esc(lead['bridge'])}</textarea></label>
+                <label>Публичная HTTPS-ссылка на файл (если есть)<input name="file_url" value="{esc(lead['file_url'])}"></label>
+                <label>Тип файла по ссылке<select name="file_kind"><option value="document" {'selected' if kind=='document' else ''}>PDF / документ</option><option value="image" {'selected' if kind=='image' else ''}>Картинка</option></select></label>
+                <p>Загруженный файл: {esc(lead['file_path']) or 'нет'}</p>
+                <label><input type="checkbox" name="remove_file"> Убрать файл или ссылку</label>
+                <label><input type="checkbox" name="enabled" {'checked' if lead['enabled'] else ''}> Включён</label><button>Сохранить</button></form>
+                <form method="post" action="/admin/lead-magnets/{tag}/file" enctype="multipart/form-data">{hidden()}
+                <label>Загрузить PDF, PNG или JPEG<input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required></label>
+                <button>Загрузить файл</button></form></article>'''
+        body += f'''<article><h3>Новый тег</h3><form method="post" action="/admin/lead-magnets">{hidden()}
+            <label>Тег для ссылки ?start=...<input name="tag" pattern="[A-Za-z0-9_-]{{1,64}}" maxlength="64" required></label>
+            <label>Приветствие (можно {{name}})<textarea name="greeting" rows="3" required></textarea></label>
+            <label>Фраза-переход к диагностике<textarea name="bridge" rows="3" required></textarea></label>
+            <label>Публичная HTTPS-ссылка на файл (необязательно)<input name="file_url"></label>
+            <label>Тип файла по ссылке<select name="file_kind"><option value="document">PDF / документ</option><option value="image">Картинка</option></select></label>
+            <label><input type="checkbox" name="enabled" checked> Включён</label><button>Добавить</button></form></article>'''
+        return page("Лид-магниты", body)
+
+    @app.post("/admin/lead-magnets")
+    async def add_lead_magnet(request: Request):
+        data = await form(request)
+        tag = str(data.get("tag", "")).strip()
+        if store.one("SELECT 1 FROM lead_magnets WHERE tag=?", (tag,)):
+            raise HTTPException(409, "Такой тег уже существует")
+        save_lead(tag, data)
+        return RedirectResponse("/admin/lead-magnets", status_code=303)
+
+    @app.post("/admin/lead-magnets/{tag}")
+    async def edit_lead_magnet(tag: str, request: Request):
+        data = await form(request)
+        if not store.one("SELECT 1 FROM lead_magnets WHERE tag=?", (tag,)):
+            raise HTTPException(404)
+        save_lead(tag, data)
+        return RedirectResponse("/admin/lead-magnets", status_code=303)
+
+    @app.post("/admin/lead-magnets/{tag}/file")
+    async def upload_lead_magnet_file(tag: str, request: Request):
+        data = await form(request)
+        if not store.one("SELECT 1 FROM lead_magnets WHERE tag=?", (tag,)):
+            raise HTTPException(404)
+        upload = data.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(400, "Выберите файл")
+        content = await upload.read(20 * 1024 * 1024 + 1)
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(413, "Файл больше 20 МБ")
+        extension = Path(upload.filename).suffix.lower()
+        if extension == ".pdf" and content.startswith(b"%PDF-"):
+            kind = "document"
+        elif extension in {".png", ".jpg", ".jpeg"}:
+            from PIL import Image
+            try:
+                image = Image.open(io.BytesIO(content))
+                image.verify()
+                if image.format not in {"PNG", "JPEG"}:
+                    raise ValueError
+            except Exception:
+                raise HTTPException(400, "Ожидается PDF, PNG или JPEG")
+            extension = ".png" if image.format == "PNG" else ".jpg"
+            kind = "image"
+        else:
+            raise HTTPException(400, "Ожидается PDF, PNG или JPEG")
+        config.media_dir.mkdir(parents=True, exist_ok=True)
+        path = config.media_dir / (uuid.uuid4().hex + extension)
+        path.write_bytes(content)
+        store.execute("UPDATE lead_magnets SET file_path=?,file_url=NULL,file_kind=? WHERE tag=?",
+                      ("uploads/" + path.name, kind, tag))
+        return RedirectResponse("/admin/lead-magnets", status_code=303)
+
     @app.get("/admin/texts")
     async def texts(request: Request):
         auth(request)
@@ -370,9 +493,9 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         auth(request)
         rows = store.all("""SELECT u.*,r.variant,r.completed_at,r.booked_at FROM users u
             LEFT JOIN runs r ON r.id=u.current_run ORDER BY u.first_seen DESC LIMIT 500""")
-        body = '<p>Последние 500 пользователей. Отметка записи нужна для воронки, если сервис записи не присылает webhook.</p><table><tr><th>ID</th><th>Имя</th><th>Источник</th><th>Шаг</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>'
+        body = '<p>Последние 500 пользователей. Подтверждайте запись вручную только после проверки в системе бронирования, если она не присылает webhook.</p><table><tr><th>ID</th><th>Имя</th><th>Источник</th><th>Шаг</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>'
         for r in rows:
-            booking = esc(r["booked_at"]) if r["booked_at"] else f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Записался</button></form>'
+            booking = esc(r["booked_at"]) if r["booked_at"] else f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Подтвердить запись</button></form>'
             body += f'<tr><td>{r["telegram_id"]}</td><td>{esc(r["first_name"])}</td><td>{esc(r["source"])}</td><td>{esc(r["current_part"])} {esc(r["stage"])}</td><td>{esc(r["variant"])}</td><td>{esc(r["phone"])}</td><td>{booking}</td></tr>'
         return page("Пользователи", body + '</table>')
 
@@ -383,7 +506,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         if not user or not user["current_run"]:
             raise HTTPException(404)
         store.execute("UPDATE runs SET booked_at=COALESCE(booked_at,?) WHERE id=?", (now(), user["current_run"]))
-        store.event(user_id, "booked", activity=False)
+        store.event(user_id, "booked", detail="verified_manually", activity=False)
         return RedirectResponse("/admin/users", status_code=303)
 
     @app.post("/booking-webhook")
@@ -400,13 +523,13 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         if not user or not user["current_run"]:
             raise HTTPException(404)
         store.execute("UPDATE runs SET booked_at=COALESCE(booked_at,?) WHERE id=?", (now(), user["current_run"]))
-        store.event(user_id, "booked", activity=False)
+        store.event(user_id, "booked", detail="booking_webhook", activity=False)
         return {"ok": True}
 
     @app.get("/admin/export")
     async def exports(request: Request):
         auth(request)
-        links = ''.join(f'<li><a href="/admin/export/{table}.csv">{table}.csv</a></li>' for table in ("users", "runs", "scores", "events", "answers"))
+        links = ''.join(f'<li><a href="/admin/export/{table}.csv">{table}.csv</a></li>' for table in ("users", "runs", "scores", "events", "answers", "lead_magnets"))
         return page("Выгрузка", f'<article><ul>{links}<li><a href="/admin/backup.sqlite3">Полная резервная копия SQLite</a></li></ul></article>')
 
     @app.get("/admin/export/{table}.csv")

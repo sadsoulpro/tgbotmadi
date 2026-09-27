@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton,
@@ -96,7 +97,7 @@ def create_router(store: Store, config: Settings) -> Router:
                 return
         if part["image_position"] != "before" and part["kind"] != "image":
             await send_image()
-        store.event(user_id, "audio_opened" if part["kind"] == "audio" else "part_opened", part_no)
+        store.event(user_id, "step_sent", part_no)
         if part["sphere"] or part["kind"] == "score":
             store.set_stage(user_id, "score", part_no)
             await show_score_prompt(message, user_id, part_no)
@@ -146,13 +147,14 @@ def create_router(store: Store, config: Settings) -> Router:
                              reply_markup=inline([(texts["button_edit_score"], f"edit:list:{run_id}")]))
         second = result.state if result.safe else texts["result_state"].format(paragraph=result.state)
         await message.answer(second + "\n\n" + disclaimer)
-        buttons = [(texts["button_listen_further"], f"continue:result:{run_id}")]
+        next_ready = store.part(8) is not None
+        buttons = [(texts["button_listen_further"], f"continue:result:{run_id}")] if next_ready else []
         booking_url = store.option("booking_url") or config.booking_url
         if not result.safe and booking_url:
             buttons.append((texts["button_personal_review"], f"booking:result:{run_id}"))
-        choice_text = texts["result_choice"] if len(buttons) == 2 else texts["result_choice_single"]
+        choice_text = texts["result_waiting"] if not next_ready else texts["result_choice"] if len(buttons) == 2 else texts["result_choice_single"]
         await message.answer(choice_text + "\n\n" + disclaimer,
-                             reply_markup=inline(*[[button] for button in buttons]))
+                             reply_markup=inline(*[[button] for button in buttons]) if buttons else None)
         if not update and user["phone_asked"] == 0 and not user["phone"]:
             store.execute("UPDATE users SET phone_asked=1 WHERE telegram_id=?", (user_id,))
             await message.answer(texts["phone_prompt"], reply_markup=ReplyKeyboardMarkup(
@@ -181,6 +183,12 @@ def create_router(store: Store, config: Settings) -> Router:
         else:
             await show_part(message, user_id, user["current_part"])
 
+    async def show_welcome(message: Message, user_id: int) -> None:
+        texts = store.texts()
+        name = message.from_user.first_name if message.from_user else store.user(user_id)["first_name"]
+        await message.answer(texts["welcome"].format(name=name or "Друг"),
+                             reply_markup=inline([(texts["button_begin"], "begin")]))
+
     @router.message(CommandStart())
     async def start(message: Message) -> None:
         if not message.from_user:
@@ -188,14 +196,27 @@ def create_router(store: Store, config: Settings) -> Router:
         user_id = message.from_user.id
         source = (message.text or "").partition(" ")[2].strip()
         source = source[:64] if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", source) else None
-        fresh = store.upsert_user(user_id, message.from_user.username, message.from_user.first_name or "друг", source)
-        if fresh:
-            name = message.from_user.first_name or "Друг"
-            texts = store.texts()
-            await message.answer(texts["welcome"].format(name=name),
-                                 reply_markup=inline([(texts["button_begin"], "begin")]))
-        else:
-            await resume(message, user_id)
+        store.upsert_user(user_id, message.from_user.username, message.from_user.first_name or "друг", source)
+        lead = store.lead_magnet(source) if source else None
+        if lead:
+            await message.answer(lead["greeting"].format(name=message.from_user.first_name or "Друг"))
+            file = media_path(lead["file_path"], config) if lead["file_path"] else lead["file_url"]
+            if file:
+                try:
+                    if isinstance(file, Path):
+                        if not file.is_file():
+                            raise FileNotFoundError(file)
+                        file = FSInputFile(file)
+                    if lead["file_kind"] == "image":
+                        await message.answer_photo(file)
+                    else:
+                        await message.answer_document(file)
+                    store.event(user_id, "lead_file_sent", detail=source)
+                except (TelegramAPIError, OSError):
+                    log.exception("Could not send lead magnet for tag %s", source)
+                    await message.answer(store.texts()["lead_file_error"])
+            await message.answer(lead["bridge"])
+        await show_welcome(message, user_id)
 
     @router.message(Command("continue"))
     async def continue_command(message: Message) -> None:
@@ -244,7 +265,7 @@ def create_router(store: Store, config: Settings) -> Router:
                 return
         url = store.option("booking_url") or config.booking_url
         if url:
-            store.event(message.from_user.id, "booking_clicked")
+            store.event(message.from_user.id, "booking_requested")
             texts = store.texts()
             await message.answer(texts["booking_intro"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=texts["button_open_booking"], url=url)]
@@ -313,7 +334,7 @@ def create_router(store: Store, config: Settings) -> Router:
         ):
             await show_score_prompt(query.message, user_id, from_part)
             return
-        store.event(user_id, "part_next", from_part)
+        store.event(user_id, "step_advanced", from_part)
         await show_part(query.message, user_id, from_part + 1)
 
     @router.callback_query(F.data.startswith("score:"))
@@ -403,7 +424,11 @@ def create_router(store: Store, config: Settings) -> Router:
             return
         if query.data != f"continue:result:{user['current_run']}":
             return
+        if not store.part(8):
+            await query.message.answer(store.texts()["result_waiting"])
+            return
         store.event(user_id, "continue_after_result")
+        store.event(user_id, "step_advanced", 7)
         await show_part(query.message, user_id, 8)
 
     @router.callback_query(F.data.startswith("booking:result:"))
@@ -421,7 +446,7 @@ def create_router(store: Store, config: Settings) -> Router:
             return
         url = store.option("booking_url") or config.booking_url
         if url:
-            store.event(query.from_user.id, "booking_clicked")
+            store.event(query.from_user.id, "booking_requested")
             texts = store.texts()
             await query.message.answer(texts["booking_intro"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=texts["button_open_booking"], url=url)]

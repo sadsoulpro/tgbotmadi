@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -84,6 +85,78 @@ def test_admin_edits_and_export(product):
     assert upload.status_code == 200
     part = store.part(1)
     assert part["audio_path"].startswith("uploads/") and part["image_path"].startswith("uploads/")
+
+
+def test_lead_magnet_setup_and_tag_metrics(product):
+    store, config = product
+    client = TestClient(create_admin(store, config))
+    auth = ("owner", config.admin_password)
+    page = client.get("/admin/lead-magnets", auth=auth)
+    assert page.status_code == 200
+    token = re.search(r'name="csrf" value="([a-f0-9]+)"', page.text).group(1)
+    data = {"csrf": token, "tag": "guide_otec", "greeting": "{name}, держи гайд.",
+            "bridge": "Теперь пройдём диагностику.", "file_kind": "document", "enabled": "on"}
+    assert client.post("/admin/lead-magnets", auth=auth, data=data).status_code == 200
+    assert store.lead_magnet("guide_otec")["greeting"] == "{name}, держи гайд."
+    assert client.post("/admin/lead-magnets", auth=auth,
+                       data={**data, "tag": "bad tag"}, follow_redirects=False).status_code == 400
+    upload = client.post("/admin/lead-magnets/guide_otec/file", auth=auth, data={"csrf": token},
+                         files={"file": ("guide.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")})
+    assert upload.status_code == 200
+    lead = store.lead_magnet("guide_otec")
+    assert lead["file_path"].startswith("uploads/")
+    assert (config.media_dir / lead["file_path"].removeprefix("uploads/")).is_file()
+    store.upsert_user(42, "nick", "Имя", "guide_otec")
+    run = store.start_run(42)
+    store.complete(42, 5, "B2")
+    dashboard = client.get("/admin", auth=auth).text
+    assert "Лид-магниты и теги" in dashboard and "guide_otec" in dashboard
+    assert "Отправлено" in dashboard and "Перешёл" in dashboard
+    assert "guide_otec" in client.get("/admin/export/lead_magnets.csv", auth=auth).text
+    assert store.one("SELECT source FROM runs WHERE id=?", (run,))["source"] == "guide_otec"
+
+
+def test_existing_database_migrates_event_names_and_source(tmp_path: Path):
+    path = tmp_path / "old.sqlite3"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE users (telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
+            source TEXT, first_seen TEXT, last_seen TEXT, current_part INTEGER,
+            current_run INTEGER, stage TEXT, phone TEXT, phone_asked INTEGER,
+            reminder_count INTEGER, last_activity TEXT);
+        CREATE TABLE runs (id INTEGER PRIMARY KEY, telegram_id INTEGER, started_at TEXT,
+            completed_at TEXT, average REAL, variant TEXT, result_seen_at TEXT, booked_at TEXT);
+        CREATE TABLE events (id INTEGER PRIMARY KEY, telegram_id INTEGER, run_id INTEGER,
+            part INTEGER, kind TEXT, detail TEXT, created_at TEXT);
+        INSERT INTO users VALUES (42,NULL,'Иван','inerciya','2026-01-01','2026-01-01',1,1,'part',NULL,0,0,'2026-01-01');
+        INSERT INTO runs VALUES (1,42,'2026-01-01',NULL,NULL,NULL,NULL,NULL);
+        INSERT INTO events VALUES (1,42,1,1,'audio_opened',NULL,'2026-01-01');
+        INSERT INTO events VALUES (2,42,1,1,'part_next',NULL,'2026-01-01');
+        INSERT INTO events VALUES (3,42,1,NULL,'booking_clicked',NULL,'2026-01-01');
+    """)
+    old.commit()
+    old.close()
+    store = Store(path)
+    assert store.one("SELECT source FROM runs WHERE id=1")["source"] == "inerciya"
+    assert [r["kind"] for r in store.all("SELECT kind FROM events ORDER BY id")] == [
+        "step_sent", "step_advanced", "booking_requested"]
+
+
+def test_booking_confirmation_requires_external_verification(tmp_path: Path):
+    config = Settings("123:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
+                      "", "", "example-webhook-secret", tmp_path / "book.sqlite3", tmp_path / "media")
+    store = Store(config.database_path)
+    store.upsert_user(42, "nick", "Имя", "inerciya")
+    run = store.start_run(42)
+    store.event(42, "booking_requested")
+    assert store.one("SELECT booked_at FROM runs WHERE id=?", (run,))["booked_at"] is None
+    client = TestClient(create_admin(store, config))
+    payload = {"telegram_id": 42}
+    assert client.post("/booking-webhook", json=payload).status_code == 401
+    assert client.post("/booking-webhook", json=payload,
+                       headers={"X-Booking-Secret": "example-webhook-secret"}).status_code == 200
+    assert store.one("SELECT booked_at FROM runs WHERE id=?", (run,))["booked_at"] is not None
+    assert store.one("SELECT detail FROM events WHERE kind='booked'")["detail"] == "booking_webhook"
 
 
 class FakeBot:

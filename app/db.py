@@ -31,7 +31,7 @@ class Store:
         CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL REFERENCES users(telegram_id),
             started_at TEXT NOT NULL, completed_at TEXT, average REAL, variant TEXT,
-            result_seen_at TEXT, booked_at TEXT
+            result_seen_at TEXT, booked_at TEXT, source TEXT
         );
         CREATE TABLE IF NOT EXISTS scores (
             run_id INTEGER NOT NULL REFERENCES runs(id), sphere TEXT NOT NULL,
@@ -57,9 +57,20 @@ class Store:
         CREATE TABLE IF NOT EXISTS texts (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rules (key TEXT PRIMARY KEY, value REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS options (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS lead_magnets (
+            tag TEXT PRIMARY KEY, greeting TEXT NOT NULL, bridge TEXT NOT NULL,
+            file_path TEXT, file_url TEXT, file_kind TEXT NOT NULL DEFAULT 'document',
+            enabled INTEGER NOT NULL DEFAULT 1
+        );
         """)
         if "last_reminder_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(users)")}:
             self.conn.execute("ALTER TABLE users ADD COLUMN last_reminder_at TEXT")
+        if "source" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(runs)")}:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN source TEXT")
+            self.conn.execute("UPDATE runs SET source=(SELECT source FROM users WHERE users.telegram_id=runs.telegram_id)")
+        self.conn.execute("UPDATE events SET kind='step_sent' WHERE kind IN ('audio_opened','part_opened')")
+        self.conn.execute("UPDATE events SET kind='step_advanced' WHERE kind='part_next'")
+        self.conn.execute("UPDATE events SET kind='booking_requested' WHERE kind='booking_clicked'")
         if not self.conn.execute("SELECT 1 FROM parts LIMIT 1").fetchone():
             for pos, (title, audio, image, sphere) in enumerate(PARTS, 1):
                 self.conn.execute("INSERT INTO parts(position,title,intro,kind,audio_path,image_path,sphere) VALUES(?,?,?,?,?,?,?)",
@@ -109,7 +120,9 @@ class Store:
 
     def start_run(self, user_id: int) -> int:
         stamp = now()
-        cursor = self.conn.execute("INSERT INTO runs(telegram_id,started_at) VALUES(?,?)", (user_id, stamp))
+        latest = self.one("SELECT detail FROM events WHERE telegram_id=? AND kind='start' AND detail IS NOT NULL AND detail!='' ORDER BY id DESC LIMIT 1", (user_id,))
+        source = latest["detail"] if latest else self.user(user_id)["source"]
+        cursor = self.conn.execute("INSERT INTO runs(telegram_id,started_at,source) VALUES(?,?,?)", (user_id, stamp, source))
         run_id = cursor.lastrowid
         self.conn.execute("UPDATE users SET current_run=?,current_part=1,stage='part',phone_asked=0 WHERE telegram_id=?", (run_id, user_id))
         self.conn.commit()
@@ -145,6 +158,9 @@ class Store:
         row = self.one("SELECT value FROM options WHERE key=?", (key,))
         return row["value"] if row else ""
 
+    def lead_magnet(self, tag: str) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM lead_magnets WHERE tag=? AND enabled=1", (tag,))
+
     def set_option(self, key: str, value: str) -> None:
         self.execute("INSERT INTO options VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
@@ -157,7 +173,7 @@ class Store:
         self.event(user_id, "result", user["current_part"], variant)
 
     def export_rows(self, table: str) -> list[dict]:
-        if table not in {"users", "runs", "scores", "events", "answers"}:
+        if table not in {"users", "runs", "scores", "events", "answers", "lead_magnets"}:
             raise ValueError(table)
         return [dict(row) for row in self.all(f"SELECT * FROM {table}")]
 
