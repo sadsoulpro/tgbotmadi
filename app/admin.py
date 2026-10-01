@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import binascii
 import hmac
 import html
 import io
@@ -25,10 +26,43 @@ def esc(value: object) -> str:
     return html.escape(str(value if value is not None else ""), quote=True)
 
 
+def secure_equals(value: str, expected: str) -> bool:
+    return hmac.compare_digest(value.encode("utf-8"), expected.encode("utf-8"))
+
+
 def create_admin(store: Store, config: Settings) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     csrf_token = hmac.new(config.admin_password.encode(), b"admin-csrf-v1", "sha256").hexdigest()
     session_seconds = 12 * 60 * 60
+    login_window_seconds = 10 * 60
+    login_attempt_limit = 5
+    failed_logins: dict[str, list[float]] = {}
+
+    def login_key(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def check_login_limit(request: Request) -> None:
+        key = login_key(request)
+        current = time.monotonic()
+        recent = [stamp for stamp in failed_logins.get(key, []) if current - stamp < login_window_seconds]
+        if recent:
+            failed_logins[key] = recent
+        else:
+            failed_logins.pop(key, None)
+        if len(recent) >= login_attempt_limit:
+            raise HTTPException(429, "Слишком много попыток входа. Повтори через 10 минут.",
+                                headers={"Retry-After": str(login_window_seconds)})
+
+    def failed_login(request: Request) -> None:
+        failed_logins.setdefault(login_key(request), []).append(time.monotonic())
+        if len(failed_logins) > 1024:
+            current = time.monotonic()
+            for key in list(failed_logins):
+                if not any(current - stamp < login_window_seconds for stamp in failed_logins[key]):
+                    del failed_logins[key]
+
+    def successful_login(request: Request) -> None:
+        failed_logins.pop(login_key(request), None)
 
     def signed_session(stamp: int) -> str:
         body = f"{config.admin_user}:{stamp}"
@@ -52,13 +86,17 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         header = request.headers.get("authorization", "")
         if not header.startswith("Basic "):
             raise HTTPException(303, headers={"Location": "/admin/login"})
+        check_login_limit(request)
         try:
             import base64
             user, password = base64.b64decode(header[6:], validate=True).decode().split(":", 1)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            failed_login(request)
             raise HTTPException(401, headers={"WWW-Authenticate": 'Basic realm="Tochka Opory"'})
-        if not hmac.compare_digest(user, config.admin_user) or not hmac.compare_digest(password, config.admin_password):
+        if not secure_equals(user, config.admin_user) or not secure_equals(password, config.admin_password):
+            failed_login(request)
             raise HTTPException(401, headers={"WWW-Authenticate": 'Basic realm="Tochka Opory"'})
+        successful_login(request)
 
     async def form(request: Request):
         auth(request)
@@ -98,10 +136,13 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         data = await request.form()
         if not hmac.compare_digest(str(data.get("csrf", "")), csrf_token):
             raise HTTPException(403)
+        check_login_limit(request)
         username = str(data.get("username", ""))
         password = str(data.get("password", ""))
-        if not hmac.compare_digest(username, config.admin_user) or not hmac.compare_digest(password, config.admin_password):
+        if not secure_equals(username, config.admin_user) or not secure_equals(password, config.admin_password):
+            failed_login(request)
             return login_page("Неверный логин или пароль.")
+        successful_login(request)
         response = RedirectResponse("/admin", status_code=303)
         response.set_cookie("admin_session", signed_session(int(time.time())), max_age=session_seconds,
                             httponly=True, samesite="strict", secure=request.url.scheme == "https", path="/admin")

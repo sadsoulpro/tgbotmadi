@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.admin import create_admin
-from app.config import Settings
+from app.config import Settings, valid_admin_password
 from app.content import SPHERES
 from app.db import Store
 from app.reminders import send_due_reminders
@@ -85,6 +85,43 @@ def test_admin_edits_and_export(product):
     assert upload.status_code == 200
     part = store.part(1)
     assert part["audio_path"].startswith("uploads/") and part["image_path"].startswith("uploads/")
+
+
+def test_admin_password_length_and_login_throttle(product):
+    assert not valid_admin_password("shortpass11")
+    assert valid_admin_password("word-word-12")
+    assert not valid_admin_password("replace_with_a_long_random_password")
+
+    store, config = product
+    client = TestClient(create_admin(store, config))
+    login_token = re.search(r'name="csrf" value="([a-f0-9]+)"', client.get("/admin/login").text).group(1)
+    credentials = {"csrf": login_token, "username": "owner", "password": "wrong"}
+    for _ in range(5):
+        assert client.post("/admin/login", data=credentials).status_code == 401
+    blocked = client.post("/admin/login", data={**credentials, "password": config.admin_password})
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == "600"
+
+
+def test_admin_basic_auth_is_throttled(product):
+    store, config = product
+    client = TestClient(create_admin(store, config))
+    for _ in range(5):
+        assert client.get("/admin", auth=("owner", "wrong")).status_code == 401
+    assert client.get("/admin", auth=("owner", config.admin_password)).status_code == 429
+
+
+def test_admin_accepts_cyrillic_passphrase(product):
+    store, config = product
+    config = Settings(config.token, config.admin_user, "длинная-фраза", config.admin_host,
+                      config.admin_port, config.booking_url, config.contact_url,
+                      config.booking_webhook_secret, config.database_path, config.media_dir)
+    assert valid_admin_password(config.admin_password)
+    client = TestClient(create_admin(store, config))
+    login_token = re.search(r'name="csrf" value="([a-f0-9]+)"', client.get("/admin/login").text).group(1)
+    response = client.post("/admin/login", data={"csrf": login_token, "username": "owner",
+                                                  "password": config.admin_password}, follow_redirects=False)
+    assert response.status_code == 303
 
 
 def test_lead_magnet_setup_and_tag_metrics(product):

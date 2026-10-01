@@ -8,7 +8,7 @@ from aiogram import Bot
 
 from .admin import create_admin
 from .bot import run_bot
-from .config import settings
+from .config import MIN_ADMIN_PASSWORD_LENGTH, settings, valid_admin_password
 from .db import Store
 from .reminders import reminder_loop
 
@@ -18,8 +18,8 @@ async def main() -> None:
     config = settings()
     if not config.token or config.token.endswith("replace_with_real_token"):
         raise SystemExit("Укажите BOT_TOKEN в .env")
-    if len(config.admin_password) < 16 or config.admin_password == "replace_with_a_long_random_password":
-        raise SystemExit("Укажите случайный ADMIN_PASSWORD длиной от 16 символов")
+    if not valid_admin_password(config.admin_password):
+        raise SystemExit(f"Укажите уникальный ADMIN_PASSWORD длиной от {MIN_ADMIN_PASSWORD_LENGTH} символов")
     if config.admin_host not in ("127.0.0.1", "localhost", "::1"):
         logging.warning("Admin is exposed beyond localhost. Use HTTPS behind a reverse proxy.")
     store = Store(config.database_path)

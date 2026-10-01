@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+MIN_ADMIN_PASSWORD_LENGTH = 12
+
+
+def valid_admin_password(value: str) -> bool:
+    return len(value) >= MIN_ADMIN_PASSWORD_LENGTH and value != "replace_with_a_long_random_password"
 
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
