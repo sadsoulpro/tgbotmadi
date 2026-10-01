@@ -25,7 +25,7 @@ cd /opt/tgbotmadi
 cp .env.example .env
 mkdir -p data
 sudo chown -R 10001:10001 data
-chmod 700 data
+sudo chmod 700 data
 chmod 600 .env
 ```
 
