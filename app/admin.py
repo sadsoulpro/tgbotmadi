@@ -125,6 +125,10 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         <main><h1>Точка опоры</h1><p>Вход в админку</p>{warning}<form method="post" action="/admin/login">{hidden()}<label>Логин<input name="username" autocomplete="username" required></label><label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button>Войти</button></form></main></html>'''
         return HTMLResponse(body, status_code=401 if error else 200)
 
+    @app.get("/")
+    async def homepage():
+        return RedirectResponse("/admin", status_code=302)
+
     @app.get("/admin/login")
     async def login(request: Request):
         if valid_session(request.cookies.get("admin_session")):

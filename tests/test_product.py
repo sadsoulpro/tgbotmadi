@@ -59,12 +59,16 @@ def test_progress_and_prior_run_are_preserved(product):
 def test_admin_edits_and_export(product):
     store, config = product
     client = TestClient(create_admin(store, config))
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code == 302 and root.headers["location"] == "/admin"
+    assert "Вход в админку" in client.get("/").text
     redirect = client.get("/admin", follow_redirects=False)
     assert redirect.status_code == 303 and redirect.headers["location"] == "/admin/login"
     login_html = client.get("/admin/login")
     login_token = re.search(r'name="csrf" value="([a-f0-9]+)"', login_html.text).group(1)
     assert client.post("/admin/login", data={"csrf": login_token, "username": "owner", "password": "wrong"}).status_code == 401
     assert client.post("/admin/login", data={"csrf": login_token, "username": "owner", "password": config.admin_password}).status_code == 200
+    assert "Обзор" in client.get("/").text
     assert client.get("/admin").status_code == 200
     auth = ("owner", config.admin_password)
     page = client.get("/admin/texts", auth=auth)
