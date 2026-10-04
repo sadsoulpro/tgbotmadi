@@ -12,8 +12,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.admin import create_admin
+from app.bot import media_path
 from app.config import Settings, valid_admin_password
-from app.content import SPHERES
+from app.content import CHECKLIST_LEADS, SPHERES
 from app.db import Store
 from app.reminders import send_due_reminders
 from app.result import classify
@@ -151,6 +152,19 @@ def test_lead_magnet_setup_and_tag_metrics(product):
     assert "Отправлено" in dashboard and "Перешёл" in dashboard
     assert "guide_otec" in client.get("/admin/export/lead_magnets.csv", auth=auth).text
     assert store.one("SELECT source FROM runs WHERE id=?", (run,))["source"] == "guide_otec"
+
+
+def test_supplied_checklists_are_seeded_and_remain_editable(product):
+    store, config = product
+    for tag, title in CHECKLIST_LEADS:
+        lead = store.lead_magnet(tag)
+        assert lead is not None
+        assert title in lead["greeting"]
+        assert media_path(lead["file_path"], config).is_file()
+    tag = "checklist_gnev"
+    store.execute("UPDATE lead_magnets SET greeting=? WHERE tag=?", ("Текст владельца, {name}", tag))
+    reopened = Store(config.database_path)
+    assert reopened.lead_magnet(tag)["greeting"] == "Текст владельца, {name}"
 
 
 def test_existing_database_migrates_event_names_and_source(tmp_path: Path):

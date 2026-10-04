@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .content import DEFAULT_RULES, PARTS, TEXTS
+from .content import CHECKLIST_LEADS, DEFAULT_RULES, PARTS, TEXTS
 
 
 def now() -> str:
@@ -81,6 +81,12 @@ class Store:
             self.conn.execute("INSERT OR IGNORE INTO rules VALUES(?,?)", (key, value))
         for key, value in {"booking_url": "", "contact_url": "", "emoji_spiritual": "", "emoji_emotional": "", "emoji_mental": "", "emoji_physical": ""}.items():
             self.conn.execute("INSERT OR IGNORE INTO options VALUES(?,?)", (key, value))
+        for tag, title in CHECKLIST_LEADS:
+            self.conn.execute("""INSERT OR IGNORE INTO lead_magnets
+                (tag,greeting,bridge,file_path,file_kind,enabled) VALUES(?,?,?,?,?,1)""",
+                (tag, f"Привет, {{name}}! Вот чек-лист «{title}». Отметь, что тебе откликается.",
+                 "Когда будешь готов, переходи к бесплатной диагностике «Точка опоры».",
+                 f"assets/lead_magnets/{tag}.pdf", "document"))
         self.conn.commit()
 
     def one(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:

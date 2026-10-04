@@ -11,6 +11,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home bot
 
 COPY app/ ./app/
+COPY assets/ ./assets/
 COPY *.mp3 *.png ./
 
 RUN mkdir -p /app/data && chown -R 10001:10001 /app/data

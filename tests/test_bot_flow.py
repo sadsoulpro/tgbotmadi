@@ -26,6 +26,30 @@ class FakeBot(Bot):
                        from_user=User(id=self.id, is_bot=True, first_name="Bot"))
 
 
+def test_supplied_checklist_start_sends_pdf_then_one_begin_button(tmp_path: Path):
+    async def scenario():
+        config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
+                          "", "", "", tmp_path / "bot.sqlite3", tmp_path / "media")
+        store = Store(config.database_path)
+        bot = FakeBot()
+        dispatcher = Dispatcher()
+        dispatcher.include_router(create_router(store, config))
+        person = User(id=42, is_bot=False, first_name="Иван")
+        chat = Chat(id=42, type="private")
+        update = Update(update_id=1, message=Message(message_id=1, date=datetime.now(timezone.utc),
+                                                     chat=chat, text="/start checklist_udobniy", from_user=person))
+        await dispatcher.feed_update(bot, update)
+        assert [call.__class__.__name__ for call in bot.calls] == [
+            "SendMessage", "SendDocument", "SendMessage", "SendMessage"]
+        assert bot.calls[1].document.path.name == "checklist_udobniy.pdf"
+        buttons = [call for call in bot.calls if isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)]
+        assert len(buttons) == 1
+        assert buttons[0].reply_markup.inline_keyboard[0][0].text == "Начать"
+        assert store.user(42)["stage"] == "welcome"
+
+    asyncio.run(scenario())
+
+
 def test_complete_diagnostic_and_restart(tmp_path: Path):
     async def scenario():
         config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
