@@ -1,0 +1,7 @@
+# Добавьте этот блок в существующий /etc/caddy/Caddyfile.
+# Основной сайт и tgbot.madirahman.com оставьте без изменений.
+bio.madirahman.com {
+    root * /opt/tgbotmadi/bio
+    encode zstd gzip
+    file_server
+}
