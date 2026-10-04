@@ -366,8 +366,12 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/lead-magnets")
     async def lead_magnets(request: Request):
         auth(request)
-        body = '<p>Новых материалов пока нет: бот показывает обычное приветствие. Добавьте тег, приветствие и фразу-переход; файл необязателен. После материала бот покажет общее приветствие с одной кнопкой.</p>'
-        for lead in store.all("SELECT * FROM lead_magnets ORDER BY tag"):
+        leads = store.all("SELECT * FROM lead_magnets ORDER BY tag")
+        body = ('<p>Лид-магниты настроены. Для каждого тега можно изменить приветствие, файл и фразу-переход. '
+                'После материала бот покажет общее приветствие с одной кнопкой.</p>' if leads else
+                '<p>Материалов пока нет: бот показывает обычное приветствие. Добавьте тег, приветствие '
+                'и фразу-переход; файл необязателен.</p>')
+        for lead in leads:
             tag = esc(lead["tag"])
             kind = lead["file_kind"]
             body += f'''<article><h3>{tag}</h3><form method="post" action="/admin/lead-magnets/{tag}">{hidden()}

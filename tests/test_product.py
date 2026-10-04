@@ -131,6 +131,8 @@ def test_lead_magnet_setup_and_tag_metrics(product):
     auth = ("owner", config.admin_password)
     page = client.get("/admin/lead-magnets", auth=auth)
     assert page.status_code == 200
+    assert "Лид-магниты настроены" in page.text
+    assert "Материалов пока нет" not in page.text
     token = re.search(r'name="csrf" value="([a-f0-9]+)"', page.text).group(1)
     data = {"csrf": token, "tag": "guide_otec", "greeting": "{name}, держи гайд.",
             "bridge": "Теперь пройдём диагностику.", "file_kind": "document", "enabled": "on"}
