@@ -142,20 +142,29 @@ def create_router(store: Store, config: Settings) -> Router:
         else:
             store.complete(user_id, result.average, result.variant)
         lines = "\n".join(f"{sphere_label(store, key)} — {scores[key]}" for key in SPHERES)
-        disclaimer = texts["disclaimer"]
-        await message.answer(texts["result_intro"].format(scores=lines, paragraph=result.paragraph) + "\n\n" + disclaimer,
-                             reply_markup=inline([(texts["button_edit_score"], f"edit:list:{run_id}")]))
-        second = result.state if result.safe else texts["result_state"].format(paragraph=result.state)
-        await message.answer(second + "\n\n" + disclaimer)
+        buttons = [[(texts["button_edit_score"], f"edit:list:{run_id}")]]
+        if store.user(user_id)["stage"] == "result_preview":
+            buttons.append([(texts["button_continue"], f"result:details:{run_id}")])
+        await message.answer(texts["result_intro"].format(scores=lines, paragraph=result.paragraph) + "\n\n" + texts["disclaimer"],
+                             reply_markup=inline(*buttons))
+
+    async def show_result_details(message: Message, user_id: int) -> None:
+        user = store.user(user_id)
+        run_id = user["current_run"]
+        scores = store.scores(run_id)
+        texts = store.texts()
+        result = classify(scores, store.rules(), texts)
+        if not result.safe:
+            await message.answer(texts["result_state"].format(paragraph=result.state))
         next_ready = store.part(8) is not None
         buttons = [(texts["button_listen_further"], f"continue:result:{run_id}")] if next_ready else []
         booking_url = store.option("booking_url") or config.booking_url
         if not result.safe and booking_url:
             buttons.append((texts["button_personal_review"], f"booking:result:{run_id}"))
         choice_text = texts["result_waiting"] if not next_ready else texts["result_choice"] if len(buttons) == 2 else texts["result_choice_single"]
-        await message.answer(choice_text + "\n\n" + disclaimer,
+        await message.answer(choice_text,
                              reply_markup=inline(*[[button] for button in buttons]) if buttons else None)
-        if not update and user["phone_asked"] == 0 and not user["phone"]:
+        if user["phone_asked"] == 0 and not user["phone"]:
             store.execute("UPDATE users SET phone_asked=1 WHERE telegram_id=?", (user_id,))
             await message.answer(texts["phone_prompt"], reply_markup=ReplyKeyboardMarkup(
                 keyboard=[[KeyboardButton(text=texts["button_share_phone"], request_contact=True)], [KeyboardButton(text=texts["button_later"])]],
@@ -168,7 +177,9 @@ def create_router(store: Store, config: Settings) -> Router:
         if not user or user["stage"] == "welcome":
             texts = store.texts()
             await message.answer(texts["begin_prompt"], reply_markup=inline([(texts["button_begin"], "begin")]))
-        elif user["stage"] in ("result", "edit_score"):
+        elif user["stage"] == "result":
+            await show_result_details(message, user_id)
+        elif user["stage"] in ("result_preview", "edit_score"):
             await show_result(message, user_id, update=True)
         elif user["stage"] == "finished":
             await message.answer(store.texts()["finished"])
@@ -368,7 +379,7 @@ def create_router(store: Store, config: Settings) -> Router:
         store.event(user_id, "score_set", part_no, str(value))
         await query.message.answer(store.texts()["score_saved"].format(value=value))
         if editing:
-            store.set_stage(user_id, "result", 7)
+            store.set_stage(user_id, "result_preview", 7)
             await show_result(query.message, user_id, update=True)
             return
         if part_no == 4:
@@ -386,7 +397,7 @@ def create_router(store: Store, config: Settings) -> Router:
         if not query.message:
             return
         user = store.user(query.from_user.id)
-        if not user or user["stage"] not in ("result", "edit_score"):
+        if not user or user["stage"] not in ("result_preview", "result", "edit_score"):
             return
         if query.data != f"edit:list:{user['current_run']}":
             return
@@ -400,7 +411,7 @@ def create_router(store: Store, config: Settings) -> Router:
         if not query.message:
             return
         user = store.user(query.from_user.id)
-        if not user or user["stage"] not in ("result", "edit_score"):
+        if not user or user["stage"] not in ("result_preview", "result", "edit_score"):
             return
         try:
             _, raw_run, raw_part = query.data.split(":")
@@ -430,6 +441,27 @@ def create_router(store: Store, config: Settings) -> Router:
         store.event(user_id, "continue_after_result")
         store.event(user_id, "step_advanced", 7)
         await show_part(query.message, user_id, 8)
+
+    @router.callback_query(F.data.startswith("result:details:"))
+    async def result_details(query: CallbackQuery) -> None:
+        await query.answer()
+        if not query.message:
+            return
+        user_id = query.from_user.id
+        user = store.user(user_id)
+        if not user or user["stage"] != "result_preview":
+            return
+        if query.data != f"result:details:{user['current_run']}":
+            return
+        store.set_stage(user_id, "result")
+        store.event(user_id, "result_details_opened", 7)
+        try:
+            await query.message.edit_reply_markup(reply_markup=inline([
+                (store.texts()["button_edit_score"], f"edit:list:{user['current_run']}")
+            ]))
+        except TelegramAPIError:
+            log.warning("Could not remove used result continuation button for %s", user_id)
+        await show_result_details(query.message, user_id)
 
     @router.callback_query(F.data.startswith("booking:result:"))
     async def result_booking(query: CallbackQuery) -> None:

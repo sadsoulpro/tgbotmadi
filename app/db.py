@@ -175,7 +175,7 @@ class Store:
         stamp = now()
         self.execute("UPDATE runs SET completed_at=COALESCE(completed_at,?),result_seen_at=COALESCE(result_seen_at,?),average=?,variant=? WHERE id=?",
                      (stamp, stamp, average, variant, user["current_run"]))
-        self.set_stage(user_id, "result")
+        self.set_stage(user_id, "result_preview")
         self.event(user_id, "result", user["current_part"], variant)
 
     def export_rows(self, table: str) -> list[dict]:

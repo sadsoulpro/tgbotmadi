@@ -98,10 +98,24 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
                 await click(f"score:{first}:{part}:6")
             if part < 7:
                 await click(f"next:{first}:{part}")
-        assert store.user(42)["stage"] == "result"
+        assert store.user(42)["stage"] == "result_preview"
         assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='step_sent'")["n"] == 7
         assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='step_advanced'")["n"] == 6
+        assert not any("Следующие части серии пока готовятся" in (getattr(call, "text", "") or "") for call in bot.calls)
+        result_card = next(call for call in reversed(bot.calls) if "Вот твои четыре цифры" in (getattr(call, "text", "") or ""))
+        assert [[button.text for button in row] for row in result_card.reply_markup.inline_keyboard] == [
+            ["Изменить оценку"], ["Продолжить"]]
+        assert not any("Помнишь, в начале" in (getattr(call, "text", "") or "") for call in bot.calls)
+        assert not any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
+        await click(f"result:details:{first}")
+        assert store.user(42)["stage"] == "result"
+        edited_card = next(call for call in reversed(bot.calls) if call.__class__.__name__ == "EditMessageReplyMarkup")
+        assert [[button.text for button in row] for row in edited_card.reply_markup.inline_keyboard] == [["Изменить оценку"]]
         assert any("Следующие части серии пока готовятся" in (getattr(call, "text", "") or "") for call in bot.calls)
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='result_details_opened'")["n"] == 1
+        detail_count = len(bot.calls)
+        await click(f"result:details:{first}")
+        assert len(bot.calls) == detail_count + 1  # callback acknowledgement only
         assert not any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
             and any(button.text == "Слушать дальше" for row in call.reply_markup.inline_keyboard for button in row)
@@ -122,14 +136,16 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         await click(f"score:{first}:4:1")
         assert store.scores(first)["spiritual"] == 1
         assert store.one("SELECT variant FROM runs WHERE id=?", (first,))["variant"] == "A1"
+        assert store.user(42)["stage"] == "result_preview"
         await message("/start nadryv")
         assert store.user(42)["source"] == "inerciya"
         assert bot.calls[-3].__class__.__name__ == "SendDocument"
-        assert store.user(42)["stage"] == "result"
+        assert store.user(42)["stage"] == "result_preview"
         await click("begin")
         assert store.user(42)["current_run"] == first
         assert store.one("SELECT source FROM runs WHERE id=?", (first,))["source"] == "inerciya"
         store.execute("INSERT INTO parts(position,title,intro,kind,prompt,enabled) VALUES(8,'Роли','Роли','text_answer','Назови роли',1)")
+        await click(f"result:details:{first}")
         await click(f"continue:result:{first}")
         assert store.user(42)["stage"] == "text_answer"
         await message("Позже")
@@ -148,6 +164,8 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
             if part < 7:
                 await click(f"next:{second}:{part}")
         assert store.one("SELECT variant FROM runs WHERE id=?", (second,))["variant"] == "C"
+        await click(f"result:details:{second}")
+        assert sum("Судя по цифрам" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:]) == 1
         assert any("Дальше можно слушать серию" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:])
         assert not any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)

@@ -18,7 +18,7 @@ async def send_due_reminders(bot: Bot, store: Store) -> int:
     total = max(7, len(store.parts()))
     users = store.all("SELECT * FROM users WHERE reminder_count<2 AND stage!='finished'")
     for user in users:
-        if user["stage"] in ("result", "edit_score") and total <= 7:
+        if user["stage"] in ("result_preview", "result", "edit_score") and total <= 7:
             continue
         activity = datetime.fromisoformat(user["last_activity"])
         threshold = timedelta(hours=24) if user["reminder_count"] == 0 else timedelta(days=3)
@@ -28,11 +28,11 @@ async def send_due_reminders(bot: Bot, store: Store) -> int:
             if current - datetime.fromisoformat(user["last_reminder_at"]) < timedelta(days=2):
                 continue
         part = min(max(user["current_part"], 1), total)
-        left = max(0, 7 - part) if user["stage"] not in ("result", "edit_score") else 0
+        left = max(0, 7 - part) if user["stage"] not in ("result_preview", "result", "edit_score") else 0
         texts = store.texts()
         if user["stage"] == "welcome":
             text = texts["reminder_welcome"]
-        elif user["stage"] in ("result", "edit_score"):
+        elif user["stage"] in ("result_preview", "result", "edit_score"):
             text = texts["reminder_after_result"]
         else:
             text = texts["reminder"].format(part=part, total=total, left=left)
