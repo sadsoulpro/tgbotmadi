@@ -76,6 +76,8 @@ def test_admin_edits_and_export(product):
     assert client.post("/admin/texts/A1", auth=auth, data={"csrf": token, "value": "Новый текст"}).status_code == 200
     assert store.texts()["A1"] == "Новый текст"
     assert client.post("/admin/texts/A1", auth=auth, data={"csrf": token, "value": "{unknown}"}).status_code == 400
+    assert client.post("/admin/texts/booking_offer", auth=auth,
+                       data={"csrf": token, "value": "Без ссылки"}, follow_redirects=False).status_code == 400
     assert client.post("/admin/rules", auth=auth, data={"csrf": token, **{k: str(v) for k, v in store.rules().items()}}).status_code == 200
     store.upsert_user(42, "nick", "Имя", "inerciya")
     csv_response = client.get("/admin/export/users.csv", auth=auth)
@@ -106,6 +108,16 @@ def test_admin_password_length_and_login_throttle(product):
     blocked = client.post("/admin/login", data={**credentials, "password": config.admin_password})
     assert blocked.status_code == 429
     assert blocked.headers["retry-after"] == "600"
+
+
+def test_temporary_booking_link_is_updated_without_overwriting_custom_url(product):
+    store, config = product
+    assert store.option("booking_url") == ""
+    store.set_option("booking_url", "https://madirahman.com/")
+    reopened = Store(config.database_path)
+    assert reopened.option("booking_url") == "https://madirahman.com/bio"
+    reopened.set_option("booking_url", "https://example.org/my-booking")
+    assert Store(config.database_path).option("booking_url") == "https://example.org/my-booking"
 
 
 def test_admin_basic_auth_is_throttled(product):

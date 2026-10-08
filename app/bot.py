@@ -16,7 +16,7 @@ from aiogram.types import (
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import ROOT, Settings
-from .content import SPHERES, SPHERE_LABELS
+from .content import DEFAULT_BOOKING_URL, SPHERES, SPHERE_LABELS
 from .db import Store, now
 from .result import classify
 
@@ -63,6 +63,10 @@ def sphere_label(store: Store, key: str) -> str:
 
 def create_router(store: Store, config: Settings) -> Router:
     router = Router()
+
+    def booking_link() -> str:
+        url = store.option("booking_url") or config.booking_url or DEFAULT_BOOKING_URL
+        return DEFAULT_BOOKING_URL if url.rstrip("/") == "https://madirahman.com" else url
 
     async def show_part(message: Message, user_id: int, part_no: int) -> None:
         part = store.part(part_no)
@@ -158,19 +162,27 @@ def create_router(store: Store, config: Settings) -> Router:
             await message.answer(texts["result_state"].format(paragraph=result.state))
         next_ready = store.part(8) is not None
         buttons = [(texts["button_listen_further"], f"continue:result:{run_id}")] if next_ready else []
-        booking_url = store.option("booking_url") or config.booking_url
-        if not result.safe and booking_url:
+        booking_url = booking_link()
+        if booking_url:
             buttons.append((texts["button_personal_review"], f"booking:result:{run_id}"))
         choice_text = texts["result_waiting"] if not next_ready else texts["result_choice"] if len(buttons) == 2 else texts["result_choice_single"]
         await message.answer(choice_text,
                              reply_markup=inline(*[[button] for button in buttons]) if buttons else None)
-        if user["phone_asked"] == 0 and not user["phone"]:
-            store.execute("UPDATE users SET phone_asked=1 WHERE telegram_id=?", (user_id,))
-            await message.answer(texts["phone_prompt"], reply_markup=ReplyKeyboardMarkup(
-                keyboard=[[KeyboardButton(text=texts["button_share_phone"], request_contact=True)], [KeyboardButton(text=texts["button_later"])]],
-                resize_keyboard=True, one_time_keyboard=True,
-            ))
-            store.event(user_id, "phone_prompt")
+
+    async def show_booking_offer(message: Message, user_id: int) -> None:
+        url = booking_link()
+        if not url:
+            await message.answer(store.texts()["booking_missing"])
+            return
+        texts = store.texts()
+        store.event(user_id, "booking_requested")
+        if store.user(user_id):
+            store.execute("UPDATE users SET phone_asked=CASE WHEN phone_asked=0 THEN 1 ELSE phone_asked END WHERE telegram_id=?", (user_id,))
+        await message.answer(texts["booking_offer"].format(url=url), reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=texts["button_leave_phone"], request_contact=True)]],
+            resize_keyboard=True, one_time_keyboard=True,
+        ))
+        store.event(user_id, "phone_prompt")
 
     async def resume(message: Message, user_id: int) -> None:
         user = store.user(user_id)
@@ -268,21 +280,10 @@ def create_router(store: Store, config: Settings) -> Router:
     async def booking_menu(message: Message) -> None:
         if not message.from_user:
             return
-        user = store.user(message.from_user.id)
-        if user and user["current_run"]:
-            row = store.one("SELECT variant FROM runs WHERE id=?", (user["current_run"],))
-            if row and row["variant"] == "C":
-                await message.answer(store.texts()["safe_booking_response"])
-                return
-        url = store.option("booking_url") or config.booking_url
-        if url:
-            store.event(message.from_user.id, "booking_requested")
-            texts = store.texts()
-            await message.answer(texts["booking_intro"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=texts["button_open_booking"], url=url)]
-            ]))
-        else:
-            await message.answer(store.texts()["booking_missing"])
+        if not store.user(message.from_user.id):
+            store.upsert_user(message.from_user.id, message.from_user.username,
+                              message.from_user.first_name or "друг", None)
+        await show_booking_offer(message, message.from_user.id)
 
     @router.message(Command("contact"))
     async def contact_menu(message: Message) -> None:
@@ -473,16 +474,7 @@ def create_router(store: Store, config: Settings) -> Router:
             return
         if query.data != f"booking:result:{user['current_run']}":
             return
-        run = store.one("SELECT variant FROM runs WHERE id=?", (user["current_run"],))
-        if run and run["variant"] == "C":
-            return
-        url = store.option("booking_url") or config.booking_url
-        if url:
-            store.event(query.from_user.id, "booking_requested")
-            texts = store.texts()
-            await query.message.answer(texts["booking_intro"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=texts["button_open_booking"], url=url)]
-            ]))
+        await show_booking_offer(query.message, query.from_user.id)
 
     @router.message(F.contact)
     async def phone(message: Message) -> None:
@@ -493,7 +485,7 @@ def create_router(store: Store, config: Settings) -> Router:
             return
         store.execute("UPDATE users SET phone=? WHERE telegram_id=?", (message.contact.phone_number, message.from_user.id))
         store.event(message.from_user.id, "phone_saved")
-        await message.answer(store.texts()["phone_saved"], reply_markup=ReplyKeyboardRemove())
+        await message.answer(store.texts()["booking_phone_saved"], reply_markup=ReplyKeyboardRemove())
 
     async def phone_later(message: Message) -> None:
         if message.from_user:

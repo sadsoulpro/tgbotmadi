@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, Update, User
+from aiogram.types import CallbackQuery, Chat, Contact, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, Update, User
 
 from app.bot import create_router
 from app.config import Settings
@@ -127,10 +127,23 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
             and any(button.text == "Хочу личный разбор" for row in call.reply_markup.inline_keyboard for button in row)
             for call in bot.calls
         )
-        assert any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
+        assert not any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
         await click(f"booking:result:{first}")
         assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='booking_requested'")["n"] == 1
         assert store.one("SELECT booked_at FROM runs WHERE id=?", (first,))["booked_at"] is None
+        offer = next(call for call in reversed(bot.calls) if "Вот ссылка для записи" in (getattr(call, "text", "") or ""))
+        assert "https://example.org/book" in offer.text
+        assert "два коротких поля" in offer.text
+        assert isinstance(offer.reply_markup, ReplyKeyboardMarkup)
+        contact_button = offer.reply_markup.keyboard[0][0]
+        assert contact_button.text == "Оставить номер" and contact_button.request_contact
+        ordinal += 1
+        await dispatcher.feed_update(bot, Update(update_id=ordinal, message=Message(
+            message_id=ordinal, date=datetime.now(timezone.utc), chat=chat, from_user=person,
+            contact=Contact(phone_number="+77001234567", first_name="Иван", user_id=42),
+        )))
+        assert store.user(42)["phone"] == "+77001234567"
+        assert "Я напишу тебе в течение двух дней" in bot.calls[-1].text
         await click(f"edit:list:{first}")
         await click(f"edit:{first}:4")
         await click(f"score:{first}:4:1")
@@ -166,12 +179,15 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         assert store.one("SELECT variant FROM runs WHERE id=?", (second,))["variant"] == "C"
         await click(f"result:details:{second}")
         assert sum("Судя по цифрам" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:]) == 1
-        assert any("Дальше можно слушать серию" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:])
-        assert not any(
+        assert any("Дальше — как тебе откликается" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:])
+        assert any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
             and any(button.text == "Хочу личный разбор" for row in call.reply_markup.inline_keyboard for button in row)
             for call in bot.calls[new_calls:]
         )
+        await click(f"booking:result:{second}")
+        assert "https://example.org/book" in bot.calls[-1].text
+        assert bot.calls[-1].reply_markup.keyboard[0][0].request_contact
         assert any(call.__class__.__name__ == "SendAudio" for call in bot.calls)
         await bot.session.close()
 

@@ -452,7 +452,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/texts")
     async def texts(request: Request):
         auth(request)
-        body = "<p>Сохраняйте переменные в фигурных скобках: {name}, {scores}, {paragraph}, {sphere}, {value}, {part}, {total}, {left}.</p>"
+        body = "<p>Сохраняйте переменные в фигурных скобках: {name}, {scores}, {paragraph}, {sphere}, {value}, {part}, {total}, {left}, {url}.</p>"
         for row in store.all("SELECT * FROM texts ORDER BY key"):
             key = quote(row["key"])
             body += f'<article><form method="post" action="/admin/texts/{key}">{hidden()}<label><b>{esc(row["key"])}</b><textarea name="value" rows="5">{esc(row["value"])}</textarea></label><button>Сохранить</button></form></article>'
@@ -474,6 +474,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             "welcome": {"name"}, "part_header": {"part", "total", "intro"},
             "score_prompt": {"sphere"}, "score_saved": {"value"},
             "result_intro": {"scores", "paragraph"}, "result_state": {"paragraph"},
+            "booking_offer": {"url"},
             "compensation": {"sphere", "value"},
             "reminder": {"part", "total", "left"},
         }.get(key, set())
@@ -481,7 +482,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         if not required.issubset(present):
             raise HTTPException(400, "Не удаляйте обязательные переменные шаблона")
         # Validate formatting variables against a harmless sample before saving.
-        samples = {name: "пример" for name in ("name", "scores", "paragraph", "sphere", "value", "part", "total", "left")}
+        samples = {name: "пример" for name in ("name", "scores", "paragraph", "sphere", "value", "part", "total", "left", "url")}
         try:
             value.format(**samples)
         except (KeyError, ValueError, IndexError):

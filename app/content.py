@@ -15,6 +15,7 @@ PARTS = [
 ]
 
 SPHERES = ["spiritual", "emotional", "mental", "physical"]
+DEFAULT_BOOKING_URL = "https://madirahman.com/bio"
 SPHERE_LABELS = {
     "spiritual": "Духовная", "emotional": "Эмоциональная",
     "mental": "Ментальная", "physical": "Физическая",
@@ -67,6 +68,7 @@ TEXTS = {
     "ready": "Когда будешь готов:",
     "button_next": "Следующая часть",
     "button_share_phone": "Поделиться номером",
+    "button_leave_phone": "Оставить номер",
     "button_later": "Позже",
     "button_begin": "Начать",
     "button_continue": "Продолжить",
@@ -81,6 +83,8 @@ TEXTS = {
     "no_scores": "Оценок пока нет.",
     "safe_booking_response": "Сейчас лучше обратиться к специалисту, если тяжёлое состояние держится неделями.",
     "booking_intro": "Запись на личный разбор:",
+    "booking_offer": "Вот ссылка для записи: {url}\n\nТам два коротких поля, это займёт минуту. Время мы согласуем в личной переписке.\n\nЕсли удобнее без формы, оставь номер, и я напишу тебе сам в течение двух дней.",
+    "booking_phone_saved": "Номер получил, спасибо. Я напишу тебе в течение двух дней, чтобы согласовать время разбора.",
     "booking_missing": "Ссылка на запись пока не добавлена владельцем бота.",
     "contact_intro": "Связаться:",
     "contact_missing": "Контакт автора появится здесь после настройки.",

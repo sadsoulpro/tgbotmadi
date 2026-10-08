@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .content import CHECKLIST_LEADS, DEFAULT_RULES, PARTS, TEXTS
+from .content import CHECKLIST_LEADS, DEFAULT_BOOKING_URL, DEFAULT_RULES, PARTS, TEXTS
 
 
 def now() -> str:
@@ -81,6 +81,9 @@ class Store:
             self.conn.execute("INSERT OR IGNORE INTO rules VALUES(?,?)", (key, value))
         for key, value in {"booking_url": "", "contact_url": "", "emoji_spiritual": "", "emoji_emotional": "", "emoji_mental": "", "emoji_physical": ""}.items():
             self.conn.execute("INSERT OR IGNORE INTO options VALUES(?,?)", (key, value))
+        # The site root was a temporary booking link before the dedicated form existed.
+        self.conn.execute("UPDATE options SET value=? WHERE key='booking_url' AND value IN ('https://madirahman.com', 'https://madirahman.com/')",
+                          (DEFAULT_BOOKING_URL,))
         for tag, title in CHECKLIST_LEADS:
             self.conn.execute("""INSERT OR IGNORE INTO lead_magnets
                 (tag,greeting,bridge,file_path,file_kind,enabled) VALUES(?,?,?,?,?,1)""",
