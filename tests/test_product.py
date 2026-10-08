@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import re
 import sqlite3
@@ -92,6 +93,33 @@ def test_admin_edits_and_export(product):
     assert upload.status_code == 200
     part = store.part(1)
     assert part["audio_path"].startswith("uploads/") and part["image_path"].startswith("uploads/")
+
+
+def test_admin_username_search_filter_and_csv(product):
+    store, config = product
+    store.upsert_user(42, "Mixed_Case", "Иван", "inerciya")
+    store.upsert_user(43, None, "Без ника", "nadryv")
+    client = TestClient(create_admin(store, config))
+    assert client.get("/admin/users", follow_redirects=False).status_code == 303
+    assert client.get("/admin/export/users.csv", follow_redirects=False).status_code == 303
+    auth = ("owner", config.admin_password)
+
+    page = client.get("/admin/users", auth=auth).text
+    assert '<th>Имя</th><th>Username</th>' in page
+    assert '<a href="https://t.me/Mixed_Case" target="_blank" rel="noopener noreferrer">@Mixed_Case</a>' in page
+    assert "<td>Без ника</td><td>—</td>" in page
+    for query in ("Mixed_Case", "@Mixed_Case", "@mixed_case"):
+        found = client.get("/admin/users", auth=auth, params={"q": query}).text
+        assert "@Mixed_Case</a>" in found and "<td>Без ника</td>" not in found
+    has_username = client.get("/admin/users", auth=auth, params={"has_username": "yes"}).text
+    no_username = client.get("/admin/users", auth=auth, params={"has_username": "no"}).text
+    assert "@Mixed_Case</a>" in has_username and "<td>Без ника</td>" not in has_username
+    assert "<td>Без ника</td>" in no_username and "@Mixed_Case</a>" not in no_username
+
+    exported = client.get("/admin/export/users.csv", auth=auth)
+    rows = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
+    assert "username" in rows[0]
+    assert {row["telegram_id"]: row["username"] for row in rows} == {"42": "Mixed_Case", "43": ""}
 
 
 def test_admin_password_length_and_login_throttle(product):

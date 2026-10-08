@@ -114,6 +114,13 @@ class Store:
     def user(self, user_id: int) -> sqlite3.Row | None:
         return self.one("SELECT * FROM users WHERE telegram_id=?", (user_id,))
 
+    def update_username(self, user_id: int, username: str | None) -> None:
+        # Telegram supplies usernames without @. Keep their original case and clear
+        # the old value if the user no longer has a username.
+        username = username.removeprefix("@") if username else None
+        self.execute("UPDATE users SET username=? WHERE telegram_id=? AND username IS NOT ?",
+                     (username, user_id, username))
+
     def upsert_user(self, user_id: int, username: str | None, first_name: str, source: str | None) -> bool:
         fresh = self.user(user_id) is None
         stamp = now()

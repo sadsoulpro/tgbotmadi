@@ -541,12 +541,43 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/users")
     async def users(request: Request):
         auth(request)
+        query = request.query_params.get("q", "").strip()[:64]
+        username_filter = request.query_params.get("has_username", "")
+        if username_filter not in ("", "yes", "no"):
+            raise HTTPException(400)
+        conditions = []
+        params = []
+        if query:
+            needle = query.removeprefix("@").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{needle}%"
+            if query.startswith("@"):
+                conditions.append("u.username LIKE ? ESCAPE '\\'")
+                params.append(pattern)
+            else:
+                conditions.append("(u.username LIKE ? ESCAPE '\\' OR u.first_name LIKE ? ESCAPE '\\' OR CAST(u.telegram_id AS TEXT) LIKE ? ESCAPE '\\')")
+                params.extend((pattern, pattern, pattern))
+        if username_filter == "yes":
+            conditions.append("u.username IS NOT NULL AND u.username != ''")
+        elif username_filter == "no":
+            conditions.append("(u.username IS NULL OR u.username = '')")
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         rows = store.all("""SELECT u.*,r.variant,r.completed_at,r.booked_at FROM users u
-            LEFT JOIN runs r ON r.id=u.current_run ORDER BY u.first_seen DESC LIMIT 500""")
-        body = '<p>Последние 500 пользователей. Подтверждайте запись вручную только после проверки в системе бронирования, если она не присылает webhook.</p><table><tr><th>ID</th><th>Имя</th><th>Источник</th><th>Шаг</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>'
+            LEFT JOIN runs r ON r.id=u.current_run""" + where +
+                         " ORDER BY u.first_seen DESC LIMIT 500", tuple(params))
+        options = ''.join(f'<option value="{value}"{" selected" if username_filter == value else ""}>{label}</option>'
+                          for value, label in (("", "Все"), ("yes", "Есть username"), ("no", "Нет username")))
+        body = (f'<form method="get" action="/admin/users"><label>Поиск по имени, ID или username '
+                f'<input name="q" value="{esc(query)}" placeholder="@username"></label>'
+                f'<label>Username <select name="has_username">{options}</select></label>'
+                '<button>Найти</button> <a href="/admin/users">Сбросить</a></form>'
+                '<p>Последние 500 пользователей по выбранному фильтру. Подтверждайте запись вручную только после проверки в системе бронирования, если она не присылает webhook.</p>'
+                '<table><tr><th>ID</th><th>Имя</th><th>Username</th><th>Источник</th><th>Шаг</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>')
         for r in rows:
             booking = esc(r["booked_at"]) if r["booked_at"] else f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Подтвердить запись</button></form>'
-            body += f'<tr><td>{r["telegram_id"]}</td><td>{esc(r["first_name"])}</td><td>{esc(r["source"])}</td><td>{esc(r["current_part"])} {esc(r["stage"])}</td><td>{esc(r["variant"])}</td><td>{esc(r["phone"])}</td><td>{booking}</td></tr>'
+            username = (r["username"] or "").removeprefix("@")
+            username_cell = (f'<a href="https://t.me/{quote(username, safe="")}" target="_blank" '
+                             f'rel="noopener noreferrer">@{esc(username)}</a>') if username else "—"
+            body += f'<tr><td>{r["telegram_id"]}</td><td>{esc(r["first_name"])}</td><td>{username_cell}</td><td>{esc(r["source"])}</td><td>{esc(r["current_part"])} {esc(r["stage"])}</td><td>{esc(r["variant"])}</td><td>{esc(r["phone"])}</td><td>{booking}</td></tr>'
         return page("Пользователи", body + '</table>')
 
     @app.post("/admin/booked/{user_id}")

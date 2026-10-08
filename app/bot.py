@@ -539,8 +539,22 @@ async def configure_commands(bot: Bot, store: Store) -> None:
     ])
 
 
-async def run_bot(bot: Bot, store: Store, config: Settings) -> None:
+def create_dispatcher(store: Store, config: Settings) -> Dispatcher:
     dispatcher = Dispatcher()
+
+    @dispatcher.update.outer_middleware()
+    async def update_username(handler, update, data):
+        incoming = update.event
+        actor = getattr(incoming, "from_user", None) or getattr(incoming, "user", None)
+        if actor is not None and not getattr(actor, "is_bot", False):
+            store.update_username(actor.id, actor.username)
+        return await handler(update, data)
+
     dispatcher.include_router(create_router(store, config))
+    return dispatcher
+
+
+async def run_bot(bot: Bot, store: Store, config: Settings) -> None:
+    dispatcher = create_dispatcher(store, config)
     await configure_commands(bot, store)
     await dispatcher.start_polling(bot, handle_signals=False)

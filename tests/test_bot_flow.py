@@ -7,7 +7,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.types import CallbackQuery, Chat, Contact, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, Update, User
 
-from app.bot import create_router
+from app.bot import create_dispatcher, create_router
 from app.config import Settings
 from app.db import Store
 
@@ -46,6 +46,43 @@ def test_supplied_checklist_start_sends_pdf_then_one_begin_button(tmp_path: Path
         assert len(buttons) == 1
         assert buttons[0].reply_markup.inline_keyboard[0][0].text == "Начать"
         assert store.user(42)["stage"] == "welcome"
+
+    asyncio.run(scenario())
+
+
+def test_username_follows_latest_telegram_action(tmp_path: Path):
+    async def scenario():
+        config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
+                          "", "", "", tmp_path / "bot.sqlite3", tmp_path / "media")
+        store = Store(config.database_path)
+        bot = FakeBot()
+        dispatcher = create_dispatcher(store, config)
+        chat = Chat(id=42, type="private")
+
+        async def message(update_id: int, username: str | None, text: str):
+            person = User(id=42, is_bot=False, first_name="Иван", username=username)
+            await dispatcher.feed_update(bot, Update(update_id=update_id, message=Message(
+                message_id=update_id, date=datetime.now(timezone.utc), chat=chat, text=text,
+                from_user=person)))
+
+        await message(1, "Mixed_Case", "/start")
+        assert store.user(42)["username"] == "Mixed_Case"
+
+        person = User(id=42, is_bot=False, first_name="Иван", username="New_Name")
+        source = Message(message_id=2, date=datetime.now(timezone.utc), chat=chat, text="button",
+                         from_user=User(id=bot.id, is_bot=True, first_name="Bot"))
+        await dispatcher.feed_update(bot, Update(update_id=2, callback_query=CallbackQuery(
+            id="2", from_user=person, chat_instance="test", message=source, data="begin")))
+        assert store.user(42)["username"] == "New_Name"
+
+        await message(3, None, "/scores")
+        assert store.user(42)["username"] is None
+
+        edited_by = User(id=42, is_bot=False, first_name="Иван", username="Latest_Case")
+        await dispatcher.feed_update(bot, Update(update_id=4, edited_message=Message(
+            message_id=3, date=datetime.now(timezone.utc), chat=chat, text="исправлено",
+            from_user=edited_by)))
+        assert store.user(42)["username"] == "Latest_Case"
 
     asyncio.run(scenario())
 
