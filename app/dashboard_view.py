@@ -15,8 +15,8 @@ def render_dashboard(store: Store, period: str, start, end, start_raw: str, end_
             f'<label>С даты<input type="date" name="from" value="{escape(start_raw)}"></label>'
             f'<label>По дату<input type="date" name="to" value="{escape(end_raw)}"></label>'
             '<button>Показать</button></form>'
-            '<p>Когорта: люди, впервые запустившие бота в выбранный период. Тестовые аккаунты исключены. '
-            'События воронки учитываются за всё время жизни этой когорты. '
+            '<p class="dashboard-note"><strong>Как читать статистику</strong><br>Показаны люди, впервые запустившие бота в выбранный период. Тестовые аккаунты исключены. '
+            'События воронки учитываются за всё время прохождения этих пользователей. '
             'Точный подсчёт всех входящих действий ведётся с момента этого обновления; старые действия полностью восстановить нельзя.</p>')
     body += f'<div class="grid"><div class="metric">Действий в периоде<b>{actions}</b></div>'
     for key, label in METRICS:

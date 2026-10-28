@@ -152,7 +152,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         return HTMLResponse(
             f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<meta name="theme-color" content="#0c1224"><title>{esc(title)} — Точка опоры</title>{ADMIN_CSS}</head>'
-            f'<body><header class="hero"><div class="hero-inner"><div class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><span>Точка опоры</span></div>'
+            f'<body><header class="hero"><div class="hero-inner"><div class="topbar"><a class="brand" href="/admin">Точка опоры</a>'
             f'<button class="menu-toggle" type="button" aria-expanded="false" aria-controls="admin-nav">Меню</button>'
             f'<nav id="admin-nav" aria-label="Разделы админки">{nav}</nav></div>'
             f'<div class="hero-copy"><div class="eyebrow">Панель управления</div><h1>{esc(title)}</h1><p>{esc(subtitle)}</p></div></div></header>'
@@ -164,7 +164,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         body = (f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                 f'<title>Вход — Точка опоры</title>{ADMIN_CSS}<style>body{{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 65% 10%,#293457,#0c1224 60%)}}'
                 '.login-card{width:min(420px,calc(100vw - 28px));margin:0;background:white;border-radius:22px;padding:clamp(22px,4vw,35px);box-shadow:0 24px 65px #02061260}.login-card h1{font-size:30px;color:#152038;margin:18px 0 7px}.login-card p{margin-bottom:22px}.login-card button{width:100%}</style></head>'
-                '<body><main class="login-card"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><span>Точка опоры</span></div>'
+                '<body><main class="login-card"><a class="brand" href="/admin">Точка опоры</a>'
                 f'<h1>Вход в админку</h1><p>Управление диагностикой и материалами бота.</p>{warning}'
                 f'<form method="post" action="/admin/login">{hidden()}<label>Логин<input name="username" autocomplete="username" required></label>'
                 '<label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button>Войти</button></form></main></body></html>')
@@ -228,22 +228,23 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                                      for key, label in (("", "Без оценки"), *SPHERE_LABELS.items()))
             audio_name = Path(part["audio_path"]).name if part["audio_path"] else "Не загружено"
             image_name = Path(part["image_path"]).name if part["image_path"] else "Не загружена"
-            kind_field = ('<p class="file-note">Тип: <b>Аудио</b>. Для первых семи частей тип и сфера оценки закреплены.</p>'
-                          if fixed else f'<label>Формат части<select name="kind">{kind_options}</select></label>')
-            sphere_field = (f'<p class="file-note">Сфера: <b>{esc(SPHERE_LABELS.get(part["sphere"], "Без оценки"))}</b></p>'
-                            if fixed else f'<label>Сфера для оценки<select name="sphere">{sphere_options}</select></label>')
+            part_fields = (f'<div class="part-info wide"><div class="part-info-grid"><div><span>Тип части</span><strong>Аудио</strong></div>'
+                           f'<div><span>Сфера оценки</span><strong>{esc(SPHERE_LABELS.get(part["sphere"], "Без оценки"))}</strong></div></div>'
+                           '<p>Для первых семи частей тип и сфера оценки закреплены.</p></div>' if fixed else
+                           f'<label>Формат части<select name="kind">{kind_options}</select></label>'
+                           f'<label>Сфера для оценки<select name="sphere">{sphere_options}</select></label>')
             status = '<span class="pill good">Доступна</span>' if part["enabled"] else '<span class="pill warn">Выключена</span>'
             body += f'''<details class="settings-group"{" open" if part['position'] == 1 else ""}><summary><span>Часть {part['position']}: {esc(part['title'])}</span>{status}</summary><div class="group-body">
             <form class="form-grid" method="post" action="/admin/parts/{pid}">{hidden()}
-            <label>Название<input name="title" value="{esc(part['title'])}" required></label>
-            {kind_field}{sphere_field}
+            <label class="wide">Название<input name="title" value="{esc(part['title'])}" required></label>
+            {part_fields}
             <label class="wide">Подводка<textarea name="intro" rows="3">{esc(part['intro'])}</textarea></label>
             <label class="wide">Вопрос для текстового ответа (если нужен)<textarea name="prompt" rows="2">{esc(part['prompt'])}</textarea></label>
             <label>Когда показать картинку<select name="image_position"><option value="after" {'selected' if part['image_position']=='after' else ''}>После аудио</option><option value="before" {'selected' if part['image_position']=='before' else ''}>Перед аудио</option></select></label>
             <label><input type="checkbox" name="enabled" {'checked' if part['enabled'] else ''} {'disabled' if fixed else ''}> Доступна пользователям</label>
             <div class="form-actions"><button>Сохранить часть</button></div></form>
-            <p class="file-note">Аудио: {esc(audio_name)} · Картинка: {esc(image_name)}</p>
             <form class="upload-form form-grid" data-require-file="true" method="post" action="/admin/parts/{pid}/media" enctype="multipart/form-data">{hidden()}
+            <div class="media-info wide"><h4>Текущие файлы</h4><div class="part-info-grid"><div><span>Аудио</span><strong>{esc(audio_name)}</strong></div><div><span>Картинка</span><strong>{esc(image_name)}</strong></div></div></div>
             <label>Заменить аудио MP3<input type="file" name="audio" accept="audio/mpeg,.mp3"></label>
             <label>Заменить картинку PNG/JPEG<input type="file" name="image" accept="image/png,image/jpeg"></label>
             <div class="form-actions"><button>Загрузить выбранные файлы</button></div></form></div></details>'''
@@ -673,7 +674,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 reminder += "; отказался"
             if r["bot_blocked"]:
                 reminder += "; бот заблокирован"
-            flags = (f'<form method="post" action="/admin/users/{r["telegram_id"]}/flags">{hidden()}'
+            flags = (f'<form class="user-flags" method="post" action="/admin/users/{r["telegram_id"]}/flags">{hidden()}'
                      f'<label><input type="checkbox" name="is_test" {"checked" if r["is_test"] else ""}> Тестовый</label>'
                      f'<label><input type="checkbox" name="paid" {"checked" if r["paid_at"] else ""}> Оплатил</label>'
                      '<button>Сохранить</button></form>')
