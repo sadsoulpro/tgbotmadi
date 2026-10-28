@@ -19,7 +19,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.datastructures import UploadFile
 
 from .config import Settings
+from .analytics import period_bounds
+from .dashboard_view import render_dashboard
 from .db import Store, now
+from .reminders import eligible_users, reminder_group, reminder_text
+from .user_view import local_time, status_label
 
 
 def esc(value: object) -> str:
@@ -113,7 +117,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             ("Обзор", "/admin"), ("Части", "/admin/parts"),
             ("Лид-магниты", "/admin/lead-magnets"), ("Тексты", "/admin/texts"),
             ("Правила", "/admin/rules"), ("Настройки", "/admin/options"),
-            ("Пользователи", "/admin/users"), ("Выгрузка", "/admin/export"), ("Выйти", "/admin/logout"),
+            ("Пользователи", "/admin/users"), ("Рассылка", "/admin/broadcast"),
+            ("Отзывы", "/admin/reviews"), ("Выгрузка", "/admin/export"), ("Выйти", "/admin/logout"),
         ])
         css = """<style>body{font:16px system-ui;margin:0;background:#f4f6f7;color:#162331}header{background:#173347;color:white;padding:18px 4vw}header a{color:white;margin-right:20px}main{max-width:1100px;margin:28px auto;padding:0 20px}article{background:white;padding:20px;margin:14px 0;border-radius:10px;box-shadow:0 1px 5px #ccd}input,textarea,select{display:block;width:100%;box-sizing:border-box;padding:9px;margin:5px 0 14px;font:inherit}input[type=checkbox]{width:auto;display:inline}button{background:#173347;color:white;border:0;padding:10px 16px;border-radius:5px;cursor:pointer}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;padding:9px;border-bottom:1px solid #ddd}small{color:#526}a{color:#125477}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.metric{background:#fff;padding:18px;border-radius:8px}.metric b{display:block;font-size:26px}</style>"""
         return HTMLResponse(f'<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{esc(title)} — Точка опоры</title>{css}<header><h1>Точка опоры</h1><nav>{nav}</nav></header><main><h2>{esc(title)}</h2>{body}</main></html>')
@@ -161,77 +166,14 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin")
     async def dashboard(request: Request):
         auth(request)
-        total = store.one("SELECT COUNT(*) AS n FROM users")["n"]
-        utc_now = datetime.now(timezone.utc)
-        periods = [("За день", 1), ("За неделю", 7), ("За месяц", 30)]
-        cards = f'<div class="metric">Всего пользователей<b>{total}</b></div>'
-        for label, days in periods:
-            since = (utc_now - timedelta(days=days)).isoformat(timespec="seconds")
-            n = store.one("SELECT COUNT(*) AS n FROM users WHERE first_seen>=?", (since,))["n"]
-            cards += f'<div class="metric">{label}<b>{n}</b></div>'
-        parts = store.parts()
-        funnel = [("Запустил бота", total)]
-        for part in parts:
-            n = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='step_sent' AND part=?", (part["position"],))["n"]
-            funnel.append((f"Отправлено на шаге {part['position']} — {part['title']}", n))
-            if part["position"] < parts[-1]["position"]:
-                advanced = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='step_advanced' AND part=?", (part["position"],))["n"]
-                funnel.append((f"Перешёл на шаг {part['position'] + 1}", advanced))
-                funnel.append((f"Не перешёл после шага {part['position']}", max(0, n - advanced)))
-        for label, sql in [
-            ("Получил результат", "SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='result'"),
-            ("Оставил телефон", "SELECT COUNT(*) AS n FROM users WHERE phone IS NOT NULL"),
-            ("Запросил ссылку записи", "SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='booking_requested'"),
-            ("Запись подтверждена", "SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE booked_at IS NOT NULL"),
-        ]:
-            funnel.append((label, store.one(sql)["n"]))
-        rows = "".join(f'<tr><td>{esc(label)}</td><td>{count}</td></tr>' for label, count in funnel)
-        source_rows = store.all("""SELECT COALESCE(u.source,'(без метки)') AS source,
-            COUNT(*) AS total,
-            SUM(CASE WHEN EXISTS(SELECT 1 FROM events e WHERE e.telegram_id=u.telegram_id AND e.kind='result') THEN 1 ELSE 0 END) AS results,
-            SUM(CASE WHEN u.phone IS NOT NULL THEN 1 ELSE 0 END) AS phones,
-            SUM(CASE WHEN EXISTS(SELECT 1 FROM events e WHERE e.telegram_id=u.telegram_id AND e.kind='booking_requested') THEN 1 ELSE 0 END) AS booking_clicks
-            FROM users u GROUP BY u.source ORDER BY total DESC""")
-        source = "".join(f'<tr><td>{esc(r["source"])}</td><td>{r["total"]}</td><td>{r["results"]}</td><td>{r["phones"]}</td><td>{r["booking_clicks"]}</td></tr>' for r in source_rows)
-        source_part_rows = []
-        for src in source_rows:
-            key = None if src["source"] == "(без метки)" else src["source"]
-            cells = []
-            for part in parts:
-                count = store.one("""SELECT COUNT(DISTINCT e.telegram_id) AS n FROM events e JOIN users u ON u.telegram_id=e.telegram_id
-                    WHERE e.kind='step_sent' AND e.part=? AND u.source IS ?""", (part["position"], key))["n"]
-                cells.append(f"<td>{count}</td>")
-            source_part_rows.append(f'<tr><td>{esc(src["source"])}</td><td>{src["total"]}</td>{"".join(cells)}<td>{src["results"]}</td></tr>')
-        variants = store.all("SELECT variant,COUNT(*) AS n FROM runs WHERE variant IS NOT NULL GROUP BY variant ORDER BY variant")
-        variant_html = "".join(f'<tr><td>{esc(r["variant"])}</td><td>{r["n"]}</td></tr>' for r in variants)
-        score_rows = store.all("SELECT sphere,value,COUNT(*) AS n FROM scores GROUP BY sphere,value ORDER BY sphere,value")
-        scores_html = "".join(f'<tr><td>{esc(r["sphere"])}</td><td>{r["value"]}</td><td>{r["n"]}</td></tr>' for r in score_rows)
-        unanswered = store.one("""SELECT COUNT(*) AS n FROM (
-            SELECT DISTINCT e.run_id,e.part FROM events e
-            JOIN parts p ON p.position=e.part AND p.sphere IS NOT NULL
-            LEFT JOIN scores s ON s.run_id=e.run_id AND s.sphere=p.sphere
-            WHERE e.kind='step_sent' AND s.run_id IS NULL
-        )""")["n"]
-        asked = store.one("""SELECT COUNT(*) AS n FROM (SELECT DISTINCT e.run_id,e.part FROM events e JOIN parts p ON p.position=e.part AND p.sphere IS NOT NULL WHERE e.kind='step_sent')""")["n"]
-        percent = round(100 * unanswered / asked, 1) if asked else 0
-        body = f'<div class="grid">{cards}<div class="metric">Не ответили после аудио<b>{unanswered}/{asked} ({percent}%)</b></div></div>'
-        body += '<article><h3>Воронка</h3><small>«Отправлено» — бот отправил материал шага. «Перешёл» — человек нажал переход дальше. Разница показывает отвал на шаге, но не причину. Telegram не сообщает факт прослушивания.</small><table><tr><th>Шаг</th><th>Люди</th></tr>' + rows + '</table></article>'
-        body += '<article><h3>Источники первого входа</h3><table><tr><th>Метка</th><th>Всего</th><th>Результат</th><th>Телефон</th><th>Запросили ссылку записи</th></tr>' + source + '</table></article>'
-        body += '<article><h3>Воронка по источникам</h3><table><tr><th>Метка</th><th>Старт</th>' + ''.join(f'<th>Часть {p["position"]}</th>' for p in parts) + '<th>Результат</th></tr>' + ''.join(source_part_rows) + '</table></article>'
-        tags = store.all("""SELECT tag FROM lead_magnets UNION SELECT detail AS tag FROM events
-            WHERE kind='start' AND detail IS NOT NULL AND detail!='' ORDER BY tag""")
-        tag_rows = ""
-        for row in tags:
-            tag = row["tag"]
-            visits = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM events WHERE kind='start' AND detail=?", (tag,))["n"]
-            started = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=?", (tag,))["n"]
-            results = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=? AND completed_at IS NOT NULL", (tag,))["n"]
-            bookings = store.one("SELECT COUNT(DISTINCT telegram_id) AS n FROM runs WHERE source=? AND booked_at IS NOT NULL", (tag,))["n"]
-            tag_rows += f"<tr><td>{esc(tag)}</td><td>{visits}</td><td>{started}</td><td>{results}</td><td>{bookings}</td></tr>"
-        body += '<article><h3>Лид-магниты и теги</h3><small>«Пришли» — уникальные люди по каждому тегу. Диагностика и результат относятся к тегу последнего входа перед началом прохождения. Повторный вход после начала прохождения не переносит его в другой тег.</small><table><tr><th>Тег</th><th>Пришли</th><th>Начали</th><th>Результат</th><th>Записались</th></tr>' + tag_rows + '</table></article>'
-        body += '<article><h3>Варианты</h3><table>' + variant_html + '</table></article>'
-        body += '<article><h3>Распределение оценок</h3><table><tr><th>Сфера</th><th>Оценка</th><th>Количество</th></tr>' + scores_html + '</table></article>'
-        return page("Обзор", body)
+        period = request.query_params.get("period", "all")
+        start_raw = request.query_params.get("from", "")
+        end_raw = request.query_params.get("to", "")
+        try:
+            start, end = period_bounds(period, start_raw, end_raw)
+        except ValueError:
+            raise HTTPException(400, "Укажите корректный период и даты")
+        return page("Обзор", render_dashboard(store, period, start, end, start_raw, end_raw))
 
     @app.get("/admin/parts")
     async def parts(request: Request):
@@ -454,6 +396,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         auth(request)
         body = "<p>Сохраняйте переменные в фигурных скобках: {name}, {scores}, {paragraph}, {sphere}, {value}, {part}, {total}, {left}, {url}.</p>"
         for row in store.all("SELECT * FROM texts ORDER BY key"):
+            if row["key"] in {"reminder", "reminder_welcome", "reminder_after_result", "button_personal_review"}:
+                continue
             key = quote(row["key"])
             body += f'<article><form method="post" action="/admin/texts/{key}">{hidden()}<label><b>{esc(row["key"])}</b><textarea name="value" rows="5">{esc(row["value"])}</textarea></label><button>Сохранить</button></form></article>'
         return page("Тексты", body)
@@ -476,7 +420,6 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             "result_intro": {"scores", "paragraph"}, "result_state": {"paragraph"},
             "booking_offer": {"url"},
             "compensation": {"sphere", "value"},
-            "reminder": {"part", "total", "left"},
         }.get(key, set())
         present = {field for _, field, _, _ in string.Formatter().parse(value) if field}
         if not required.issubset(present):
@@ -523,6 +466,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         auth(request)
         body = f'<article><form method="post" action="/admin/options">{hidden()}'
         for row in store.all("SELECT * FROM options ORDER BY key"):
+            if row["key"] == "auto_reminders_enabled":
+                continue
             body += f'<label>{esc(row["key"])}<input name="{esc(row["key"])}" value="{esc(row["value"])}"></label>'
         body += '<button>Сохранить</button></form></article>'
         return page("Настройки", body)
@@ -532,6 +477,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         data = await form(request)
         for row in store.all("SELECT key FROM options"):
             key = row["key"]
+            if key == "auto_reminders_enabled":
+                continue
             value = str(data.get(key, "")).strip()[:300]
             if key.endswith("_url") and value and not re.fullmatch(r"https://[^\s]+", value):
                 raise HTTPException(400, "Ссылка должна начинаться с https://")
@@ -545,6 +492,14 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         username_filter = request.query_params.get("has_username", "")
         if username_filter not in ("", "yes", "no"):
             raise HTTPException(400)
+        sort = request.query_params.get("sort", "recent")
+        sort_sql = {"recent": "u.last_activity DESC", "oldest": "u.last_activity ASC",
+                    "first": "u.first_seen DESC"}.get(sort)
+        if not sort_sql:
+            raise HTTPException(400)
+        inactive_raw = request.query_params.get("inactive_days", "").strip()
+        last_from = request.query_params.get("last_from", "")
+        last_to = request.query_params.get("last_to", "")
         conditions = []
         params = []
         if query:
@@ -560,25 +515,76 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             conditions.append("u.username IS NOT NULL AND u.username != ''")
         elif username_filter == "no":
             conditions.append("(u.username IS NULL OR u.username = '')")
+        if inactive_raw:
+            try:
+                inactive_days = int(inactive_raw)
+            except ValueError:
+                raise HTTPException(400)
+            if not 1 <= inactive_days <= 3650:
+                raise HTTPException(400)
+            conditions.append("u.last_activity<?")
+            params.append((datetime.now(timezone.utc) - timedelta(days=inactive_days)).isoformat(timespec="seconds"))
+        if last_from or last_to:
+            try:
+                from datetime import date, time as day_time
+                from zoneinfo import ZoneInfo
+                zone = ZoneInfo("Asia/Almaty")
+                if last_from:
+                    conditions.append("u.last_activity>=?")
+                    params.append(datetime.combine(date.fromisoformat(last_from), day_time.min, zone).astimezone(timezone.utc).isoformat())
+                if last_to:
+                    conditions.append("u.last_activity<?")
+                    params.append(datetime.combine(date.fromisoformat(last_to) + timedelta(days=1), day_time.min, zone).astimezone(timezone.utc).isoformat())
+            except ValueError:
+                raise HTTPException(400)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         rows = store.all("""SELECT u.*,r.variant,r.completed_at,r.booked_at FROM users u
             LEFT JOIN runs r ON r.id=u.current_run""" + where +
-                         " ORDER BY u.first_seen DESC LIMIT 500", tuple(params))
+                         f" ORDER BY {sort_sql} LIMIT 500", tuple(params))
         options = ''.join(f'<option value="{value}"{" selected" if username_filter == value else ""}>{label}</option>'
                           for value, label in (("", "Все"), ("yes", "Есть username"), ("no", "Нет username")))
+        sort_options = ''.join(f'<option value="{value}"{" selected" if sort == value else ""}>{label}</option>'
+                               for value, label in (("recent", "Последнее действие: новые"),
+                                                    ("oldest", "Последнее действие: старые"),
+                                                    ("first", "Первый запуск: новые")))
         body = (f'<form method="get" action="/admin/users"><label>Поиск по имени, ID или username '
                 f'<input name="q" value="{esc(query)}" placeholder="@username"></label>'
                 f'<label>Username <select name="has_username">{options}</select></label>'
+                f'<label>Не активен больше N дней<input type="number" min="1" max="3650" name="inactive_days" value="{esc(inactive_raw)}"></label>'
+                f'<label>Последнее действие с даты<input type="date" name="last_from" value="{esc(last_from)}"></label>'
+                f'<label>По дату<input type="date" name="last_to" value="{esc(last_to)}"></label>'
+                f'<label>Сортировка<select name="sort">{sort_options}</select></label>'
                 '<button>Найти</button> <a href="/admin/users">Сбросить</a></form>'
-                '<p>Последние 500 пользователей по выбранному фильтру. Подтверждайте запись вручную только после проверки в системе бронирования, если она не присылает webhook.</p>'
-                '<table><tr><th>ID</th><th>Имя</th><th>Username</th><th>Источник</th><th>Шаг</th><th>Результат</th><th>Телефон</th><th>Запись</th></tr>')
+                '<p>До 500 пользователей по выбранному фильтру. Время — Asia/Almaty. Запись подтверждайте только после проверки в системе бронирования.</p>'
+                '<div style="overflow-x:auto"><table><tr><th>ID</th><th>Имя</th><th>Username</th><th>Первый запуск</th><th>Последнее действие</th><th>Источник</th><th>Шаг</th><th>Статус</th><th>Напоминания</th><th>Продолжение</th><th>Тест / оплата</th><th>Запись</th></tr>')
         for r in rows:
-            booking = esc(r["booked_at"]) if r["booked_at"] else f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Подтвердить запись</button></form>'
+            booking = esc(local_time(r["booked_at"])) if r["booked_at"] else (f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Подтвердить запись</button></form>' if r["current_run"] else "—")
             username = (r["username"] or "").removeprefix("@")
             username_cell = (f'<a href="https://t.me/{quote(username, safe="")}" target="_blank" '
                              f'rel="noopener noreferrer">@{esc(username)}</a>') if username else "—"
-            body += f'<tr><td>{r["telegram_id"]}</td><td>{esc(r["first_name"])}</td><td>{username_cell}</td><td>{esc(r["source"])}</td><td>{esc(r["current_part"])} {esc(r["stage"])}</td><td>{esc(r["variant"])}</td><td>{esc(r["phone"])}</td><td>{booking}</td></tr>'
-        return page("Пользователи", body + '</table>')
+            step = "Результат" if r["completed_at"] else r["current_part"] or "До части 1"
+            reminder = f'{r["reminder_count"]} / 2; {local_time(r["last_reminder_at"])}'
+            if r["reminder_opt_out"]:
+                reminder += "; отказался"
+            if r["bot_blocked"]:
+                reminder += "; бот заблокирован"
+            flags = (f'<form method="post" action="/admin/users/{r["telegram_id"]}/flags">{hidden()}'
+                     f'<label><input type="checkbox" name="is_test" {"checked" if r["is_test"] else ""}> Тестовый</label>'
+                     f'<label><input type="checkbox" name="paid" {"checked" if r["paid_at"] else ""}> Оплатил</label>'
+                     '<button>Сохранить</button></form>')
+            subscription = "Ждёт" if r["wants_next_series"] else "—"
+            body += f'<tr><td>{r["telegram_id"]}</td><td>{esc(r["first_name"])}</td><td>{username_cell}</td><td>{local_time(r["first_seen"])}</td><td>{local_time(r["last_activity"])}</td><td>{esc(r["source"])}</td><td>{esc(step)}</td><td>{status_label(r, r)}</td><td>{esc(reminder)}</td><td>{subscription}</td><td>{flags}</td><td>{booking}</td></tr>'
+        return page("Пользователи", body + '</table></div>')
+
+    @app.post("/admin/users/{user_id}/flags")
+    async def user_flags(user_id: int, request: Request):
+        data = await form(request)
+        if not store.user(user_id):
+            raise HTTPException(404)
+        store.execute("""UPDATE users SET is_test=?,
+            paid_at=CASE WHEN ?=1 THEN COALESCE(paid_at,?) ELSE NULL END WHERE telegram_id=?""",
+            (int("is_test" in data), int("paid" in data), now(), user_id))
+        return RedirectResponse("/admin/users", status_code=303)
 
     @app.post("/admin/booked/{user_id}")
     async def mark_booked(user_id: int, request: Request):
@@ -607,10 +613,194 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         store.event(user_id, "booked", detail="booking_webhook", activity=False)
         return {"ok": True}
 
+    def broadcast_selection(data):
+        group = str(data.get("group", "middle"))
+        if group not in {"welcome", "middle", "late", "next_series"}:
+            raise HTTPException(400, "Неизвестная группа")
+        source = str(data.get("source", "")).strip()[:64] or None
+        if group == "next_series":
+            if not store.part(8):
+                raise HTTPException(400, "Сначала включите следующую часть серии")
+            recipients = eligible_users(store, next_series=True)
+            if source is not None:
+                recipients = [user for user in recipients if user["source"] == source]
+            body = store.texts()["next_series_message"]
+        else:
+            recipients = eligible_users(store, group=group, source=source)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            recipients = [user for user in recipients if not user["last_reminder_at"] or
+                          datetime.fromisoformat(user["last_reminder_at"]) <= cutoff]
+            body = store.texts()["reminder_first_" + group]
+        return group, source, recipients, body
+
+    @app.get("/admin/broadcast")
+    async def broadcast(request: Request):
+        auth(request)
+        sources = [row["source"] for row in store.all("SELECT DISTINCT source FROM users WHERE source IS NOT NULL ORDER BY source")]
+        choices = ''.join(f'<option value="{esc(value)}">{esc(value)}</option>' for value in sources)
+        recent = store.all("""SELECT o.*,u.first_name,u.username FROM outreach o
+            LEFT JOIN users u ON u.telegram_id=o.telegram_id ORDER BY o.id DESC LIMIT 100""")
+        enabled = store.option("auto_reminders_enabled") == "1"
+        auto_status = "включены" if enabled else "выключены"
+        auto_action = "disable" if enabled else "enable"
+        auto_button = "Выключить автоматические напоминания" if enabled else "Включить автоматические напоминания"
+        body = (f'<article><h3>Автоматические напоминания: {auto_status}</h3>'
+                '<p>Перед включением отметьте тестовые аккаунты во вкладке «Пользователи» и проверьте тексты. '
+                'После включения бот начнёт отправлять сообщения давно неактивным людям, соблюдая лимит и тихие часы.</p>'
+                f'<form method="post" action="/admin/broadcast/automation">{hidden()}'
+                f'<input type="hidden" name="action" value="{auto_action}">'
+                '<label><input type="checkbox" name="confirm_auto" required> Я проверил тестовые аккаунты и тексты</label>'
+                f'<button>{auto_button}</button></form></article>'
+                f'<article><h3>Разовая рассылка</h3><p>Только тем, кто начал бота и не получил результат. '
+                'Нажмите «Предпросмотр», проверьте число получателей и подтвердите. '
+                'В тихие часы 22:00–09:00 Asia/Almaty отправка ждёт утра.</p>'
+                f'<form method="post" action="/admin/broadcast/preview">{hidden()}'
+                '<label>Группа<select name="group"><option value="welcome">До первой части</option>'
+                '<option value="middle">Части 2–4</option><option value="late">Части 5–7</option>'
+                '<option value="next_series">Подписавшиеся на продолжение</option></select></label>'
+                f'<label>Источник (необязательно)<select name="source"><option value="">Все</option>{choices}</select></label>'
+                '<button>Предпросмотр</button></form></article>'
+                '<article><h3>Журнал отправки</h3><p>«Отправлено» означает, что Telegram принял сообщение. '
+                'Факт прочтения Telegram боту не сообщает. «Ответил» означает следующее действие пользователя в боте.</p>'
+                '<div style="overflow-x:auto"><table><tr><th>ID</th><th>Пользователь</th><th>Тип</th><th>Статус</th><th>В очереди</th><th>Отправлено</th><th>Ответил</th><th>Ошибка</th></tr>')
+        for row in recent:
+            body += (f'<tr><td>{row["id"]}</td><td>{row["telegram_id"]} {esc(row["first_name"])} '
+                     f'{esc(row["username"])}</td><td>{esc(row["kind"])}</td><td>{esc(row["status"])}</td>'
+                     f'<td>{local_time(row["queued_at"])}</td><td>{local_time(row["sent_at"])}</td>'
+                     f'<td>{local_time(row["response_at"])}</td><td>{esc(row["error"])}</td></tr>')
+        return page("Рассылка", body + '</table></div></article>')
+
+    @app.post("/admin/broadcast/automation")
+    async def toggle_automatic_reminders(request: Request):
+        data = await form(request)
+        if "confirm_auto" not in data or data.get("action") not in {"enable", "disable"}:
+            raise HTTPException(400)
+        store.set_option("auto_reminders_enabled", "1" if data["action"] == "enable" else "0")
+        return RedirectResponse("/admin/broadcast", status_code=303)
+
+    @app.post("/admin/broadcast/preview")
+    async def broadcast_preview(request: Request):
+        data = await form(request)
+        group, source, recipients, body = broadcast_selection(data)
+        kind = "next_series" if group == "next_series" else "manual"
+        cursor = store.conn.execute("""INSERT INTO campaigns(kind,group_name,source,body,created_at,status)
+            VALUES(?,?,?,?,?,'preview')""", (kind, group, source, body, now()))
+        store.conn.commit()
+        preview = (f'<article><h3>Подтверждение рассылки</h3><p>Получателей: <b>{len(recipients)}</b></p>'
+                   f'<pre style="white-space:pre-wrap">{esc(body)}</pre>'
+                   f'<form method="post" action="/admin/broadcast/send">{hidden()}'
+                   f'<input type="hidden" name="campaign_id" value="{cursor.lastrowid}">'
+                   f'<input type="hidden" name="expected_count" value="{len(recipients)}">'
+                   '<button>Подтвердить и поставить в очередь</button></form>'
+                   '<p><a href="/admin/broadcast">Отмена</a></p></article>')
+        return page("Предпросмотр рассылки", preview)
+
+    @app.post("/admin/broadcast/send")
+    async def broadcast_send(request: Request):
+        data = await form(request)
+        try:
+            campaign_id = int(data.get("campaign_id", "0"))
+            expected = int(data.get("expected_count", "-1"))
+        except ValueError:
+            raise HTTPException(400)
+        campaign = store.one("SELECT * FROM campaigns WHERE id=? AND status='preview'", (campaign_id,))
+        if not campaign:
+            raise HTTPException(409, "Этот предпросмотр уже отправлен или устарел")
+        group, source, recipients, body = broadcast_selection(
+            {"group": campaign["group_name"], "source": campaign["source"] or ""})
+        if expected != len(recipients) or campaign["body"] != body:
+            raise HTTPException(409, "Состав группы изменился. Откройте предпросмотр ещё раз.")
+        if not recipients:
+            raise HTTPException(400, "Нет получателей")
+        kind = campaign["kind"]
+        updated = store.conn.execute("UPDATE campaigns SET status='queued' WHERE id=? AND status='preview'", (campaign_id,))
+        if not updated.rowcount:
+            raise HTTPException(409)
+        store.conn.executemany("""INSERT INTO outreach
+            (telegram_id,kind,campaign_id,part,source,queued_at) VALUES(?,?,?,?,?,?)""",
+            [(user["telegram_id"], kind, campaign_id, user["current_part"], user["source"], now())
+             for user in recipients])
+        store.conn.commit()
+        return RedirectResponse("/admin/broadcast", status_code=303)
+
+    @app.get("/admin/reviews")
+    async def reviews(request: Request):
+        auth(request)
+        media = store.one("SELECT * FROM review_media WHERE id=1")
+        body = (f'<article><p>Кнопка с видео появится после добавления MP4 или публичной HTTPS-ссылки и подтверждения согласия участников. '
+                'Видео должно быть коротким — 2–3 минуты. Текстовые отзывы показываются только при загруженных изображениях. '
+                'Бот не узнаёт, досмотрел ли человек видео.</p>'
+                f'<form method="post" action="/admin/reviews" enctype="multipart/form-data">{hidden()}'
+                f'<p>Видео: {esc(media["video_path"] or media["video_url"] or "не добавлено")}</p>'
+                '<label>MP4-файл до 50 МБ<input type="file" name="video" accept="video/mp4,.mp4"></label>'
+                f'<label>Или публичная HTTPS-ссылка на видео<input name="video_url" value="{esc(media["video_url"])}"></label>'
+                '<label><input type="checkbox" name="remove_video"> Убрать видео</label>')
+        for index in range(1, 4):
+            body += (f'<p>Скриншот {index}: {esc(media[f"image{index}_path"] or "не добавлен")}</p>'
+                     f'<label>Загрузить PNG/JPEG<input type="file" name="image{index}" accept="image/png,image/jpeg"></label>'
+                     f'<label><input type="checkbox" name="remove_image{index}"> Убрать скриншот {index}</label>')
+        body += (f'<label><input type="checkbox" name="consent_confirmed" {"checked" if media["consent_confirmed"] else ""}> '
+                 'Подтверждаю согласие участников и отсутствие узнаваемых личных деталей</label>'
+                 '<button>Сохранить материалы</button></form></article>')
+        return page("Отзывы о разборе", body)
+
+    @app.post("/admin/reviews")
+    async def save_reviews(request: Request):
+        data = await form(request)
+        media = store.one("SELECT * FROM review_media WHERE id=1")
+        changes = dict(media)
+        video_url = str(data.get("video_url", "")).strip()[:2048]
+        if video_url and not re.fullmatch(r"https://[^\s]+", video_url):
+            raise HTTPException(400, "Нужна публичная HTTPS-ссылка")
+        video = data.get("video")
+        uploads = []
+        if isinstance(video, UploadFile) and video.filename:
+            content = await video.read(50 * 1024 * 1024 + 1)
+            if len(content) > 50 * 1024 * 1024:
+                raise HTTPException(413, "Видео больше 50 МБ")
+            if Path(video.filename).suffix.lower() != ".mp4" or content[4:8] != b"ftyp":
+                raise HTTPException(400, "Ожидается MP4")
+            uploads.append(("video_path", ".mp4", content))
+            changes["video_url"] = None
+        elif video_url:
+            changes["video_url"] = video_url
+            changes["video_path"] = None
+        elif "remove_video" in data:
+            changes["video_path"] = None
+            changes["video_url"] = None
+        for index in range(1, 4):
+            field = f"image{index}"
+            upload = data.get(field)
+            if isinstance(upload, UploadFile) and upload.filename:
+                content = await upload.read(10 * 1024 * 1024 + 1)
+                if len(content) > 10 * 1024 * 1024:
+                    raise HTTPException(413, "Скриншот больше 10 МБ")
+                from PIL import Image
+                try:
+                    image = Image.open(io.BytesIO(content))
+                    image.verify()
+                    if image.format not in {"PNG", "JPEG"}:
+                        raise ValueError
+                except Exception:
+                    raise HTTPException(400, "Ожидается PNG или JPEG")
+                uploads.append((f"image{index}_path", ".png" if image.format == "PNG" else ".jpg", content))
+            elif f"remove_image{index}" in data:
+                changes[f"image{index}_path"] = None
+        config.media_dir.mkdir(parents=True, exist_ok=True)
+        for field, suffix, content in uploads:
+            path = config.media_dir / (uuid.uuid4().hex + suffix)
+            path.write_bytes(content)
+            changes[field] = "uploads/" + path.name
+        changes["consent_confirmed"] = int("consent_confirmed" in data)
+        store.execute("""UPDATE review_media SET video_path=?,video_url=?,image1_path=?,image2_path=?,image3_path=?,
+            consent_confirmed=? WHERE id=1""", (changes["video_path"], changes["video_url"],
+            changes["image1_path"], changes["image2_path"], changes["image3_path"], changes["consent_confirmed"]))
+        return RedirectResponse("/admin/reviews", status_code=303)
+
     @app.get("/admin/export")
     async def exports(request: Request):
         auth(request)
-        links = ''.join(f'<li><a href="/admin/export/{table}.csv">{table}.csv</a></li>' for table in ("users", "runs", "scores", "events", "answers", "lead_magnets"))
+        links = ''.join(f'<li><a href="/admin/export/{table}.csv">{table}.csv</a></li>' for table in ("users", "runs", "scores", "events", "answers", "lead_magnets", "outreach", "campaigns", "survey_answers"))
         return page("Выгрузка", f'<article><ul>{links}<li><a href="/admin/backup.sqlite3">Полная резервная копия SQLite</a></li></ul></article>')
 
     @app.get("/admin/export/{table}.csv")

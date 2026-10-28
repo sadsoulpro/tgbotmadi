@@ -87,6 +87,73 @@ def test_username_follows_latest_telegram_action(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_survey_opt_out_next_series_and_optional_review_video(tmp_path: Path):
+    async def scenario():
+        config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
+                          "https://example.org/book", "", "", tmp_path / "bot.sqlite3", tmp_path / "media")
+        store = Store(config.database_path)
+        bot = FakeBot()
+        dispatcher = create_dispatcher(store, config)
+        person = User(id=42, is_bot=False, first_name="Иван")
+        chat = Chat(id=42, type="private")
+        sequence = 0
+
+        async def message(text):
+            nonlocal sequence
+            sequence += 1
+            await dispatcher.feed_update(bot, Update(update_id=sequence, message=Message(
+                message_id=sequence, date=datetime.now(timezone.utc), chat=chat, text=text,
+                from_user=person)))
+
+        async def click(data):
+            nonlocal sequence
+            sequence += 1
+            source = Message(message_id=sequence, date=datetime.now(timezone.utc), chat=chat,
+                             text="button", from_user=User(id=bot.id, is_bot=True, first_name="Bot"))
+            await dispatcher.feed_update(bot, Update(update_id=sequence, callback_query=CallbackQuery(
+                id=str(sequence), from_user=person, chat_instance="test", message=source, data=data)))
+
+        await message("/booking")
+        assert store.user(42) is None
+        await message("/start source")
+        await click("reminder:survey")
+        await click("survey:reason:4")
+        await message("Не успеваю слушать длинные записи")
+        answer = store.one("SELECT * FROM survey_answers WHERE telegram_id=42")
+        assert answer["reason"] == "Другое" and answer["free_text"] == "Не успеваю слушать длинные записи"
+        assert answer["source"] == "source"
+        await click("reminder:optout")
+        assert store.user(42)["reminder_opt_out"] == 1
+        await click("next_series:subscribe")
+        assert store.user(42)["wants_next_series"] == 1
+
+        run = store.start_run(42)
+        for sphere in ("spiritual", "emotional", "mental", "physical"):
+            store.score(run, sphere, 5)
+        store.complete(42, 5, "B2")
+        store.set_stage(42, "result")
+        config.media_dir.mkdir(parents=True)
+        (config.media_dir / "review.mp4").write_bytes(b"\0\0\0\x10ftypisom")
+        await message("/continue")
+        assert not any(button.text == "Посмотреть, как проходит разбор"
+                       for call in bot.calls if isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
+                       for row in call.reply_markup.inline_keyboard for button in row)
+        store.execute("UPDATE review_media SET video_path='uploads/review.mp4',consent_confirmed=1 WHERE id=1")
+        await message("/continue")
+        assert any(button.text == "Посмотреть, как проходит разбор"
+                   for call in bot.calls if isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
+                   for row in call.reply_markup.inline_keyboard for button in row)
+        assert store.user(42)["next_series_offer_sent"] == 1
+        await click(f"review:video:{run}")
+        assert any(call.__class__.__name__ == "SendVideo" for call in bot.calls)
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='review_video_opened'")["n"] == 1
+        await click(f"booking:result:{run}")
+        assert store.one("SELECT COUNT(*) AS n FROM events WHERE kind='booking_after_video'")["n"] == 1
+        await bot.session.close()
+
+    asyncio.run(scenario())
+
+
 def test_complete_diagnostic_and_restart(tmp_path: Path):
     async def scenario():
         config = Settings("123456:TEST", "owner", "verylongtestpassword", "127.0.0.1", 8080,
@@ -141,7 +208,7 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         assert not any("Следующие части серии пока готовятся" in (getattr(call, "text", "") or "") for call in bot.calls)
         result_card = next(call for call in reversed(bot.calls) if "Вот твои четыре цифры" in (getattr(call, "text", "") or ""))
         assert [[button.text for button in row] for row in result_card.reply_markup.inline_keyboard] == [
-            ["Изменить оценку"], ["Продолжить"]]
+            ["Изменить оценку"], ["Продолжить"], ["Записаться на разбор"]]
         assert not any("Помнишь, в начале" in (getattr(call, "text", "") or "") for call in bot.calls)
         assert not any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
         await click(f"result:details:{first}")
@@ -161,7 +228,7 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         assert store.one("SELECT variant FROM runs WHERE id=?", (first,))["variant"] == "B2"
         assert any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
-            and any(button.text == "Хочу личный разбор" for row in call.reply_markup.inline_keyboard for button in row)
+            and any(button.text == "Записаться на разбор" for row in call.reply_markup.inline_keyboard for button in row)
             for call in bot.calls
         )
         assert not any(isinstance(getattr(call, "reply_markup", None), ReplyKeyboardMarkup) for call in bot.calls)
@@ -219,7 +286,7 @@ def test_complete_diagnostic_and_restart(tmp_path: Path):
         assert any("Дальше — как тебе откликается" in (getattr(call, "text", "") or "") for call in bot.calls[new_calls:])
         assert any(
             isinstance(getattr(call, "reply_markup", None), InlineKeyboardMarkup)
-            and any(button.text == "Хочу личный разбор" for row in call.reply_markup.inline_keyboard for button in row)
+            and any(button.text == "Записаться на разбор" for row in call.reply_markup.inline_keyboard for button in row)
             for call in bot.calls[new_calls:]
         )
         await click(f"booking:result:{second}")

@@ -149,6 +149,15 @@ def create_router(store: Store, config: Settings) -> Router:
         buttons = [[(texts["button_edit_score"], f"edit:list:{run_id}")]]
         if store.user(user_id)["stage"] == "result_preview":
             buttons.append([(texts["button_continue"], f"result:details:{run_id}")])
+        booked = store.one("SELECT 1 FROM runs WHERE id=? AND booked_at IS NOT NULL", (run_id,))
+        if booking_link() and not booked and not user["paid_at"]:
+            buttons.append([(texts["button_book_review"], f"booking:result:{run_id}")])
+            media = store.one("SELECT * FROM review_media WHERE id=1")
+            if media and media["consent_confirmed"]:
+                if media["video_url"] or (media["video_path"] and (media_path(media["video_path"], config) or Path()).is_file()):
+                    buttons.append([(texts["button_review_video"], f"review:video:{run_id}")])
+                if any((media_path(media[f"image{i}_path"], config) or Path()).is_file() for i in range(1, 4)):
+                    buttons.append([(texts["button_review_text"], f"review:text:{run_id}")])
         await message.answer(texts["result_intro"].format(scores=lines, paragraph=result.paragraph) + "\n\n" + texts["disclaimer"],
                              reply_markup=inline(*buttons))
 
@@ -163,11 +172,23 @@ def create_router(store: Store, config: Settings) -> Router:
         next_ready = store.part(8) is not None
         buttons = [(texts["button_listen_further"], f"continue:result:{run_id}")] if next_ready else []
         booking_url = booking_link()
-        if booking_url:
-            buttons.append((texts["button_personal_review"], f"booking:result:{run_id}"))
+        can_book = not user["paid_at"] and not store.one("SELECT 1 FROM runs WHERE id=? AND booked_at IS NOT NULL", (run_id,))
+        if booking_url and can_book:
+            buttons.append((texts["button_book_review"], f"booking:result:{run_id}"))
+            media = store.one("SELECT * FROM review_media WHERE id=1")
+            if media and media["consent_confirmed"]:
+                if media["video_url"] or (media["video_path"] and (media_path(media["video_path"], config) or Path()).is_file()):
+                    buttons.append((texts["button_review_video"], f"review:video:{run_id}"))
+                if any((media_path(media[f"image{i}_path"], config) or Path()).is_file() for i in range(1, 4)):
+                    buttons.append((texts["button_review_text"], f"review:text:{run_id}"))
         choice_text = texts["result_waiting"] if not next_ready else texts["result_choice"] if len(buttons) == 2 else texts["result_choice_single"]
         await message.answer(choice_text,
                              reply_markup=inline(*[[button] for button in buttons]) if buttons else None)
+        if not next_ready and not user["next_series_offer_sent"]:
+            await message.answer(texts["next_series_offer"], reply_markup=inline([
+                (texts["button_next_series"], "next_series:subscribe")
+            ]))
+            store.execute("UPDATE users SET next_series_offer_sent=1 WHERE telegram_id=?", (user_id,))
 
     async def show_booking_offer(message: Message, user_id: int) -> None:
         url = booking_link()
@@ -175,6 +196,9 @@ def create_router(store: Store, config: Settings) -> Router:
             await message.answer(store.texts()["booking_missing"])
             return
         texts = store.texts()
+        user = store.user(user_id)
+        if user and store.one("SELECT 1 FROM events WHERE telegram_id=? AND run_id=? AND kind='review_video_opened'", (user_id, user["current_run"])):
+            store.event(user_id, "booking_after_video")
         store.event(user_id, "booking_requested")
         if store.user(user_id):
             store.execute("UPDATE users SET phone_asked=CASE WHEN phone_asked=0 THEN 1 ELSE phone_asked END WHERE telegram_id=?", (user_id,))
@@ -281,8 +305,8 @@ def create_router(store: Store, config: Settings) -> Router:
         if not message.from_user:
             return
         if not store.user(message.from_user.id):
-            store.upsert_user(message.from_user.id, message.from_user.username,
-                              message.from_user.first_name or "друг", None)
+            await message.answer(store.texts()["start_required"])
+            return
         await show_booking_offer(message, message.from_user.id)
 
     @router.message(Command("contact"))
@@ -474,7 +498,115 @@ def create_router(store: Store, config: Settings) -> Router:
             return
         if query.data != f"booking:result:{user['current_run']}":
             return
+        if user["paid_at"] or store.one("SELECT 1 FROM runs WHERE id=? AND booked_at IS NOT NULL", (user["current_run"],)):
+            return
         await show_booking_offer(query.message, query.from_user.id)
+
+    @router.callback_query(F.data == "next_series:subscribe")
+    async def subscribe_next_series(query: CallbackQuery) -> None:
+        await query.answer()
+        user = store.user(query.from_user.id)
+        if not user or not query.message:
+            return
+        store.execute("UPDATE users SET wants_next_series=1 WHERE telegram_id=?", (query.from_user.id,))
+        store.event(query.from_user.id, "next_series_subscribed")
+        await query.message.answer(store.texts()["next_series_saved"])
+
+    @router.callback_query(F.data == "reminder:optout")
+    async def opt_out_reminders(query: CallbackQuery) -> None:
+        await query.answer()
+        if not store.user(query.from_user.id) or not query.message:
+            return
+        store.execute("UPDATE users SET reminder_opt_out=1 WHERE telegram_id=?", (query.from_user.id,))
+        store.event(query.from_user.id, "reminder_opt_out")
+        await query.message.answer(store.texts()["reminder_opted_out"])
+
+    @router.callback_query(F.data == "reminder:survey")
+    async def open_survey(query: CallbackQuery) -> None:
+        await query.answer()
+        if not store.user(query.from_user.id) or not query.message:
+            return
+        reasons = ("Не было времени", "Было непонятно", "Не про меня", "Не зашёл формат аудио", "Другое")
+        await query.message.answer(store.texts()["survey_prompt"], reply_markup=inline(*[
+            [(reason, f"survey:reason:{i}")] for i, reason in enumerate(reasons)
+        ]))
+
+    @router.callback_query(F.data.startswith("survey:reason:"))
+    async def survey_reason(query: CallbackQuery) -> None:
+        await query.answer()
+        if not query.message or not store.user(query.from_user.id):
+            return
+        try:
+            index = int(query.data.rsplit(":", 1)[1])
+        except ValueError:
+            return
+        reasons = ("Не было времени", "Было непонятно", "Не про меня", "Не зашёл формат аудио", "Другое")
+        if index not in range(len(reasons)):
+            return
+        user = store.user(query.from_user.id)
+        store.execute("INSERT INTO survey_answers(telegram_id,part,source,reason,created_at) VALUES(?,?,?,?,?)",
+                      (query.from_user.id, user["current_part"], user["source"], reasons[index], now()))
+        store.event(query.from_user.id, "survey_answered", user["current_part"], str(index))
+        if index == 4:
+            store.execute("UPDATE users SET survey_pending=1 WHERE telegram_id=?", (query.from_user.id,))
+            await query.message.answer(store.texts()["survey_other_prompt"], reply_markup=inline([
+                (store.texts()["button_skip_survey_text"], "survey:skip")
+            ]))
+        else:
+            await query.message.answer(store.texts()["survey_thanks"])
+
+    @router.callback_query(F.data == "survey:skip")
+    async def skip_survey_text(query: CallbackQuery) -> None:
+        await query.answer()
+        if store.user(query.from_user.id) and query.message:
+            store.execute("UPDATE users SET survey_pending=0 WHERE telegram_id=?", (query.from_user.id,))
+            await query.message.answer(store.texts()["survey_thanks"])
+
+    @router.callback_query(F.data.startswith("review:video:"))
+    async def review_video(query: CallbackQuery) -> None:
+        await query.answer()
+        user = store.user(query.from_user.id)
+        if not user or not query.message or query.data != f"review:video:{user['current_run']}":
+            return
+        media = store.one("SELECT * FROM review_media WHERE id=1")
+        run = store.one("SELECT completed_at,booked_at FROM runs WHERE id=?", (user["current_run"],))
+        booked = run and run["booked_at"]
+        if not run or not run["completed_at"] or not media or not media["consent_confirmed"] or not (media["video_path"] or media["video_url"]) or booked or user["paid_at"]:
+            return
+        path = media_path(media["video_path"], config)
+        if not media["video_url"] and (not path or not path.is_file()):
+            await query.message.answer(store.texts()["review_media_missing"])
+            return
+        store.event(query.from_user.id, "review_video_clicked")
+        await query.message.answer_video(media["video_url"] or FSInputFile(path), caption=store.texts()["review_video_intro"])
+        store.event(query.from_user.id, "review_video_opened")
+        await query.message.answer(store.texts()["booking_intro"], reply_markup=inline([
+            (store.texts()["button_book_review"], f"booking:result:{user['current_run']}")
+        ]))
+
+    @router.callback_query(F.data.startswith("review:text:"))
+    async def review_text(query: CallbackQuery) -> None:
+        await query.answer()
+        user = store.user(query.from_user.id)
+        if not user or not query.message or query.data != f"review:text:{user['current_run']}":
+            return
+        media = store.one("SELECT * FROM review_media WHERE id=1")
+        run = store.one("SELECT completed_at,booked_at FROM runs WHERE id=?", (user["current_run"],))
+        if not run or not run["completed_at"] or not media or not media["consent_confirmed"] or run["booked_at"] or user["paid_at"]:
+            return
+        store.event(query.from_user.id, "review_text_clicked")
+        sent = 0
+        for index in range(1, 4):
+            path = media_path(media[f"image{index}_path"], config)
+            if path and path.is_file():
+                await query.message.answer_photo(FSInputFile(path))
+                sent += 1
+        if not sent:
+            await query.message.answer(store.texts()["review_media_missing"])
+            return
+        await query.message.answer(store.texts()["booking_intro"], reply_markup=inline([
+            (store.texts()["button_book_review"], f"booking:result:{user['current_run']}")
+        ]))
 
     @router.message(F.contact)
     async def phone(message: Message) -> None:
@@ -497,6 +629,14 @@ def create_router(store: Store, config: Settings) -> Router:
         if not message.from_user:
             return
         user = store.user(message.from_user.id)
+        if user and user["survey_pending"]:
+            answer = (message.text or "").strip()[:1000]
+            latest = store.one("SELECT id FROM survey_answers WHERE telegram_id=? AND reason='Другое' ORDER BY id DESC LIMIT 1", (message.from_user.id,))
+            if latest and answer:
+                store.execute("UPDATE survey_answers SET free_text=? WHERE id=?", (answer, latest["id"]))
+            store.execute("UPDATE users SET survey_pending=0 WHERE telegram_id=?", (message.from_user.id,))
+            await message.answer(store.texts()["survey_thanks"])
+            return
         if user and user["stage"] == "text_answer" and user["current_run"]:
             answer = (message.text or "").strip()[:4000]
             if answer:
@@ -543,11 +683,11 @@ def create_dispatcher(store: Store, config: Settings) -> Dispatcher:
     dispatcher = Dispatcher()
 
     @dispatcher.update.outer_middleware()
-    async def update_username(handler, update, data):
+    async def record_user_action(handler, update, data):
         incoming = update.event
         actor = getattr(incoming, "from_user", None) or getattr(incoming, "user", None)
         if actor is not None and not getattr(actor, "is_bot", False):
-            store.update_username(actor.id, actor.username)
+            store.record_action(actor.id, actor.username)
         return await handler(update, data)
 
     dispatcher.include_router(create_router(store, config))

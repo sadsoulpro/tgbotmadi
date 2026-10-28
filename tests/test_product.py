@@ -266,6 +266,7 @@ class FakeBot:
 
 def test_two_reminders_only(product):
     store, _ = product
+    store.set_option("auto_reminders_enabled", "1")
     store.upsert_user(42, "nick", "Имя", "inerciya")
     store.start_run(42)
     store.set_stage(42, "score", 4)
@@ -285,9 +286,10 @@ def test_two_reminders_only(product):
 
 def test_welcome_reminder(product):
     store, _ = product
+    store.set_option("auto_reminders_enabled", "1")
     store.upsert_user(99, "nick", "Имя", None)
     past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
     store.execute("UPDATE users SET last_activity=? WHERE telegram_id=99", (past,))
     bot = FakeBot()
     assert asyncio.run(send_due_reminders(bot, store)) == 1
-    assert "семь аудио" in bot.messages[0][1]
+    assert "первой части" in bot.messages[0][1]
