@@ -20,10 +20,15 @@ from starlette.datastructures import UploadFile
 
 from .config import Settings
 from .analytics import period_bounds
+from .admin_ui import (
+    ADMIN_CSS, ADMIN_JS, EXPORT_LABELS, OPTION_LABELS, OUTREACH_KIND_LABELS,
+    OUTREACH_STATUS_LABELS, PART_KIND_LABELS, RULE_LABELS, TEXT_GROUPS, TEXT_LABELS,
+)
 from .dashboard_view import render_dashboard
 from .db import Store, now
 from .reminders import eligible_users, reminder_group, reminder_text
 from .user_view import local_time, status_label
+from .content import SPHERE_LABELS
 
 
 def esc(value: object) -> str:
@@ -106,28 +111,63 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         auth(request)
         data = await request.form()
         if not hmac.compare_digest(str(data.get("csrf", "")), csrf_token):
-            raise HTTPException(403, "Invalid form token")
+            raise HTTPException(403, "Срок действия формы истёк. Обновите страницу и повторите действие.")
         return data
 
     def hidden() -> str:
         return f'<input type="hidden" name="csrf" value="{csrf_token}">'
 
     def page(title: str, body: str) -> HTMLResponse:
-        nav = ' '.join(f'<a href="{url}">{name}</a>' for name, url in [
+        sections = [
             ("Обзор", "/admin"), ("Части", "/admin/parts"),
             ("Лид-магниты", "/admin/lead-magnets"), ("Тексты", "/admin/texts"),
             ("Правила", "/admin/rules"), ("Настройки", "/admin/options"),
             ("Пользователи", "/admin/users"), ("Рассылка", "/admin/broadcast"),
             ("Отзывы", "/admin/reviews"), ("Выгрузка", "/admin/export"), ("Выйти", "/admin/logout"),
-        ])
-        css = """<style>body{font:16px system-ui;margin:0;background:#f4f6f7;color:#162331}header{background:#173347;color:white;padding:18px 4vw}header a{color:white;margin-right:20px}main{max-width:1100px;margin:28px auto;padding:0 20px}article{background:white;padding:20px;margin:14px 0;border-radius:10px;box-shadow:0 1px 5px #ccd}input,textarea,select{display:block;width:100%;box-sizing:border-box;padding:9px;margin:5px 0 14px;font:inherit}input[type=checkbox]{width:auto;display:inline}button{background:#173347;color:white;border:0;padding:10px 16px;border-radius:5px;cursor:pointer}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;padding:9px;border-bottom:1px solid #ddd}small{color:#526}a{color:#125477}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.metric{background:#fff;padding:18px;border-radius:8px}.metric b{display:block;font-size:26px}</style>"""
-        return HTMLResponse(f'<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{esc(title)} — Точка опоры</title>{css}<header><h1>Точка опоры</h1><nav>{nav}</nav></header><main><h2>{esc(title)}</h2>{body}</main></html>')
+        ]
+        active = ("/admin/broadcast" if "рассыл" in title.lower() else
+                  "/admin/reviews" if "отзыв" in title.lower() else
+                  "/admin/parts" if "част" in title.lower() else
+                  "/admin/lead-magnets" if "лид" in title.lower() else
+                  "/admin/texts" if "текст" in title.lower() else
+                  "/admin/rules" if "порог" in title.lower() else
+                  "/admin/options" if "настрой" in title.lower() else
+                  "/admin/users" if "пользоват" in title.lower() else
+                  "/admin/export" if "выгруз" in title.lower() else "/admin")
+        nav = ''.join(f'<a href="{url}"{" aria-current=\"page\"" if url == active else ""}>{name}</a>'
+                      for name, url in sections)
+        descriptions = {
+            "Обзор": "Динамика прохождений, источники и точки остановки — в одном месте.",
+            "Части серии": "Материалы и порядок шагов диагностики.",
+            "Лид-магниты": "Чек-листы и приветствия для ссылок с метками.",
+            "Тексты": "Сообщения бота, сгруппированные по этапам.",
+            "Пороговые значения": "Понятные настройки логики персонального результата.",
+            "Настройки": "Ссылки и значки, которые использует бот.",
+            "Пользователи": "Активность, статусы и контакты участников.",
+            "Рассылка": "Автоматические напоминания и разовые сообщения.",
+            "Отзывы о разборе": "Видео и изображения, которые увидят участники.",
+            "Выгрузка": "Таблицы и резервная копия базы.",
+        }
+        subtitle = descriptions.get(title, "Проверьте данные перед подтверждением действия.")
+        return HTMLResponse(
+            f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta name="theme-color" content="#0c1224"><title>{esc(title)} — Точка опоры</title>{ADMIN_CSS}</head>'
+            f'<body><header class="hero"><div class="hero-inner"><div class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><span>Точка опоры</span></div>'
+            f'<button class="menu-toggle" type="button" aria-expanded="false" aria-controls="admin-nav">Меню</button>'
+            f'<nav id="admin-nav" aria-label="Разделы админки">{nav}</nav></div>'
+            f'<div class="hero-copy"><div class="eyebrow">Панель управления</div><h1>{esc(title)}</h1><p>{esc(subtitle)}</p></div></div></header>'
+            f'<main><div class="page-body">{body}</div></main>{ADMIN_JS}</body></html>'
+        )
 
     def login_page(error: str = "") -> HTMLResponse:
-        warning = f'<p style="color:#a31d1d">{esc(error)}</p>' if error else ""
-        body = f'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Вход — Точка опоры</title>
-        <style>body{{font:16px system-ui;background:#f4f6f7;color:#162331;display:grid;min-height:100vh;place-items:center;margin:0}}main{{background:white;padding:32px;width:min(92vw,380px);border-radius:12px;box-shadow:0 2px 12px #ccd}}input{{display:block;width:100%;box-sizing:border-box;padding:11px;margin:7px 0 18px;font:inherit}}button{{background:#173347;color:white;border:0;padding:12px 18px;border-radius:5px;cursor:pointer;width:100%}}</style>
-        <main><h1>Точка опоры</h1><p>Вход в админку</p>{warning}<form method="post" action="/admin/login">{hidden()}<label>Логин<input name="username" autocomplete="username" required></label><label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button>Войти</button></form></main></html>'''
+        warning = f'<p role="alert" style="color:#a93748;background:#ffe8eb;padding:10px 12px;border-radius:10px">{esc(error)}</p>' if error else ""
+        body = (f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                f'<title>Вход — Точка опоры</title>{ADMIN_CSS}<style>body{{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 65% 10%,#293457,#0c1224 60%)}}'
+                '.login-card{width:min(420px,calc(100vw - 28px));margin:0;background:white;border-radius:22px;padding:clamp(22px,4vw,35px);box-shadow:0 24px 65px #02061260}.login-card h1{font-size:30px;color:#152038;margin:18px 0 7px}.login-card p{margin-bottom:22px}.login-card button{width:100%}</style></head>'
+                '<body><main class="login-card"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><span>Точка опоры</span></div>'
+                f'<h1>Вход в админку</h1><p>Управление диагностикой и материалами бота.</p>{warning}'
+                f'<form method="post" action="/admin/login">{hidden()}<label>Логин<input name="username" autocomplete="username" required></label>'
+                '<label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button>Войти</button></form></main></body></html>')
         return HTMLResponse(body, status_code=401 if error else 200)
 
     @app.get("/")
@@ -178,20 +218,39 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/parts")
     async def parts(request: Request):
         auth(request)
-        body = "<p>Части 1–7 составляют диагностику. Новые части добавляются после результата.</p>"
+        body = "<p>Первые семь частей — основная диагностика. Следующие части можно подготовить здесь и включить после загрузки материалов.</p>"
         for part in store.all("SELECT * FROM parts ORDER BY position"):
             pid = part["id"]
-            body += f'''<article><h3>Часть {part['position']}: {esc(part['title'])}</h3><form method="post" action="/admin/parts/{pid}">{hidden()}
+            fixed = part["position"] <= 7
+            kind_options = ''.join(f'<option value="{key}"{" selected" if part["kind"] == key else ""}>{label}</option>'
+                                   for key, label in PART_KIND_LABELS.items())
+            sphere_options = ''.join(f'<option value="{key}"{" selected" if (part["sphere"] or "") == key else ""}>{label}</option>'
+                                     for key, label in (("", "Без оценки"), *SPHERE_LABELS.items()))
+            audio_name = Path(part["audio_path"]).name if part["audio_path"] else "Не загружено"
+            image_name = Path(part["image_path"]).name if part["image_path"] else "Не загружена"
+            kind_field = ('<p class="file-note">Тип: <b>Аудио</b>. Для первых семи частей тип и сфера оценки закреплены.</p>'
+                          if fixed else f'<label>Формат части<select name="kind">{kind_options}</select></label>')
+            sphere_field = (f'<p class="file-note">Сфера: <b>{esc(SPHERE_LABELS.get(part["sphere"], "Без оценки"))}</b></p>'
+                            if fixed else f'<label>Сфера для оценки<select name="sphere">{sphere_options}</select></label>')
+            status = '<span class="pill good">Доступна</span>' if part["enabled"] else '<span class="pill warn">Выключена</span>'
+            body += f'''<details class="settings-group"{" open" if part['position'] == 1 else ""}><summary><span>Часть {part['position']}: {esc(part['title'])}</span>{status}</summary><div class="group-body">
+            <form class="form-grid" method="post" action="/admin/parts/{pid}">{hidden()}
             <label>Название<input name="title" value="{esc(part['title'])}" required></label>
-            <label>Подводка<textarea name="intro" rows="3">{esc(part['intro'])}</textarea></label>
-            <label>Тип<select name="kind">{''.join(f'<option value="{k}" {"selected" if part["kind"]==k else ""}>{k}</option>' for k in ('audio','image','score','text_answer','button'))}</select></label>
-            <label>Сфера для оценки<select name="sphere">{''.join(f'<option value="{k}" {"selected" if (part["sphere"] or "")==k else ""}>{k or "Без оценки"}</option>' for k in ('','spiritual','emotional','mental','physical'))}</select></label>
-            <label>Вопрос для текстового ответа<textarea name="prompt" rows="2">{esc(part['prompt'])}</textarea></label>
-            <label>Картинка<select name="image_position"><option value="after" {'selected' if part['image_position']=='after' else ''}>После аудио</option><option value="before" {'selected' if part['image_position']=='before' else ''}>Перед аудио</option></select></label>
-            <label><input type="checkbox" name="enabled" {'checked' if part['enabled'] else ''}> Доступна</label><button>Сохранить часть</button></form>
-            <small>Аудио: {esc(part['audio_path']) or 'нет'}; картинка: {esc(part['image_path']) or 'нет'}</small>
-            <form method="post" action="/admin/parts/{pid}/media" enctype="multipart/form-data">{hidden()}<label>Заменить аудио MP3<input type="file" name="audio" accept="audio/mpeg,.mp3"></label><label>Заменить картинку PNG/JPEG<input type="file" name="image" accept="image/png,image/jpeg"></label><button>Загрузить файлы</button></form></article>'''
-        body += f'''<article><h3>Добавить часть в конец</h3><form method="post" action="/admin/parts/new">{hidden()}<label>Название<input name="title" required></label><label>Тип<select name="kind"><option value="audio">Аудио</option><option value="image">Картинка</option><option value="score">Оценка</option><option value="text_answer">Текстовый ответ</option><option value="button">Кнопка</option></select></label><button>Добавить</button></form></article>'''
+            {kind_field}{sphere_field}
+            <label class="wide">Подводка<textarea name="intro" rows="3">{esc(part['intro'])}</textarea></label>
+            <label class="wide">Вопрос для текстового ответа (если нужен)<textarea name="prompt" rows="2">{esc(part['prompt'])}</textarea></label>
+            <label>Когда показать картинку<select name="image_position"><option value="after" {'selected' if part['image_position']=='after' else ''}>После аудио</option><option value="before" {'selected' if part['image_position']=='before' else ''}>Перед аудио</option></select></label>
+            <label><input type="checkbox" name="enabled" {'checked' if part['enabled'] else ''} {'disabled' if fixed else ''}> Доступна пользователям</label>
+            <div class="form-actions"><button>Сохранить часть</button></div></form>
+            <p class="file-note">Аудио: {esc(audio_name)} · Картинка: {esc(image_name)}</p>
+            <form class="upload-form form-grid" data-require-file="true" method="post" action="/admin/parts/{pid}/media" enctype="multipart/form-data">{hidden()}
+            <label>Заменить аудио MP3<input type="file" name="audio" accept="audio/mpeg,.mp3"></label>
+            <label>Заменить картинку PNG/JPEG<input type="file" name="image" accept="image/png,image/jpeg"></label>
+            <div class="form-actions"><button>Загрузить выбранные файлы</button></div></form></div></details>'''
+        new_kind_options = ''.join(f'<option value="{key}">{label}</option>' for key, label in PART_KIND_LABELS.items())
+        body += f'''<article><h3>Добавить часть в конец</h3><form class="form-grid" method="post" action="/admin/parts/new">{hidden()}
+            <label>Название<input name="title" required></label><label>Формат части<select name="kind">{new_kind_options}</select></label>
+            <div class="form-actions"><button>Добавить часть</button></div></form></article>'''
         return page("Части серии", body)
 
     @app.post("/admin/parts/{pid}")
@@ -256,10 +315,10 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 continue
             content = await upload.read(limit + 1)
             if len(content) > limit:
-                raise HTTPException(413, "File too large")
+                raise HTTPException(413, "Файл слишком большой")
             if field == "audio":
                 if Path(upload.filename).suffix.lower() != ext or not content.startswith(b"ID3") and content[:2] not in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
-                    raise HTTPException(400, "Expected MP3")
+                    raise HTTPException(400, "Нужен аудиофайл MP3")
                 suffix = ".mp3"
             else:
                 from PIL import Image
@@ -270,7 +329,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 except Exception:
                     suffix = ""
                 if not suffix:
-                    raise HTTPException(400, "Expected PNG or JPEG")
+                    raise HTTPException(400, "Нужна картинка PNG или JPEG")
             name = uuid.uuid4().hex + suffix
             destination = config.media_dir / name
             destination.write_bytes(content)
@@ -320,24 +379,28 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         for lead in leads:
             tag = esc(lead["tag"])
             kind = lead["file_kind"]
-            body += f'''<article><h3>{tag}</h3><form method="post" action="/admin/lead-magnets/{tag}">{hidden()}
-                <label>Приветствие (можно {{name}})<textarea name="greeting" rows="3" required>{esc(lead['greeting'])}</textarea></label>
-                <label>Фраза-переход к диагностике<textarea name="bridge" rows="3" required>{esc(lead['bridge'])}</textarea></label>
-                <label>Публичная HTTPS-ссылка на файл (если есть)<input name="file_url" value="{esc(lead['file_url'])}"></label>
+            status = '<span class="pill good">Включён</span>' if lead["enabled"] else '<span class="pill warn">Выключен</span>'
+            filename = Path(lead["file_path"]).name if lead["file_path"] else "Не загружен"
+            body += f'''<details class="settings-group"><summary><span>{tag}</span>{status}</summary><div class="group-body">
+                <p class="file-note">Ссылка с этой меткой: <code>?start={tag}</code>. Файл: {esc(filename)}</p>
+                <form class="form-grid" method="post" action="/admin/lead-magnets/{tag}">{hidden()}
+                <label class="wide">Приветствие <small class="label-note">Можно оставить переменную {{name}} для имени.</small><textarea name="greeting" rows="3" required>{esc(lead['greeting'])}</textarea></label>
+                <label class="wide">Фраза-переход к диагностике<textarea name="bridge" rows="3" required>{esc(lead['bridge'])}</textarea></label>
+                <label class="wide">Публичная HTTPS-ссылка на файл (если есть)<input name="file_url" value="{esc(lead['file_url'])}"></label>
                 <label>Тип файла по ссылке<select name="file_kind"><option value="document" {'selected' if kind=='document' else ''}>PDF / документ</option><option value="image" {'selected' if kind=='image' else ''}>Картинка</option></select></label>
-                <p>Загруженный файл: {esc(lead['file_path']) or 'нет'}</p>
+                <label><input type="checkbox" name="enabled" {'checked' if lead['enabled'] else ''}> Включён</label>
                 <label><input type="checkbox" name="remove_file"> Убрать файл или ссылку</label>
-                <label><input type="checkbox" name="enabled" {'checked' if lead['enabled'] else ''}> Включён</label><button>Сохранить</button></form>
-                <form method="post" action="/admin/lead-magnets/{tag}/file" enctype="multipart/form-data">{hidden()}
-                <label>Загрузить PDF, PNG или JPEG<input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required></label>
-                <button>Загрузить файл</button></form></article>'''
-        body += f'''<article><h3>Новый тег</h3><form method="post" action="/admin/lead-magnets">{hidden()}
+                <div class="form-actions"><button>Сохранить изменения</button></div></form>
+                <form class="upload-form" data-require-file="true" method="post" action="/admin/lead-magnets/{tag}/file" enctype="multipart/form-data">{hidden()}
+                <label>Новый PDF, PNG или JPEG<input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required></label>
+                <button>Загрузить выбранный файл</button></form></div></details>'''
+        body += f'''<article><h3>Новый тег</h3><form class="form-grid" method="post" action="/admin/lead-magnets">{hidden()}
             <label>Тег для ссылки ?start=...<input name="tag" pattern="[A-Za-z0-9_-]{{1,64}}" maxlength="64" required></label>
-            <label>Приветствие (можно {{name}})<textarea name="greeting" rows="3" required></textarea></label>
-            <label>Фраза-переход к диагностике<textarea name="bridge" rows="3" required></textarea></label>
-            <label>Публичная HTTPS-ссылка на файл (необязательно)<input name="file_url"></label>
+            <label class="wide">Приветствие (можно {{name}})<textarea name="greeting" rows="3" required></textarea></label>
+            <label class="wide">Фраза-переход к диагностике<textarea name="bridge" rows="3" required></textarea></label>
+            <label class="wide">Публичная HTTPS-ссылка на файл (необязательно)<input name="file_url"></label>
             <label>Тип файла по ссылке<select name="file_kind"><option value="document">PDF / документ</option><option value="image">Картинка</option></select></label>
-            <label><input type="checkbox" name="enabled" checked> Включён</label><button>Добавить</button></form></article>'''
+            <label><input type="checkbox" name="enabled" checked> Включён</label><div class="form-actions"><button>Добавить тег</button></div></form></article>'''
         return page("Лид-магниты", body)
 
     @app.post("/admin/lead-magnets")
@@ -394,12 +457,24 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/texts")
     async def texts(request: Request):
         auth(request)
-        body = "<p>Сохраняйте переменные в фигурных скобках: {name}, {scores}, {paragraph}, {sphere}, {value}, {part}, {total}, {left}, {url}.</p>"
-        for row in store.all("SELECT * FROM texts ORDER BY key"):
-            if row["key"] in {"reminder", "reminder_welcome", "reminder_after_result", "button_personal_review"}:
-                continue
-            key = quote(row["key"])
-            body += f'<article><form method="post" action="/admin/texts/{key}">{hidden()}<label><b>{esc(row["key"])}</b><textarea name="value" rows="5">{esc(row["value"])}</textarea></label><button>Сохранить</button></form></article>'
+        body = ('<p>Тексты сгруппированы по этапам. При правке сохраняйте переменные в фигурных скобках: '
+                '<code>{name}</code> — имя, <code>{scores}</code> — оценки, <code>{paragraph}</code> — разбор, '
+                '<code>{sphere}</code> — сфера, <code>{value}</code> — число, <code>{part}</code> — часть, '
+                '<code>{total}</code> — всего частей, <code>{intro}</code> — подводка, <code>{url}</code> — ссылка.</p>'
+                '<label>Найти текст по названию<input id="text-search" type="search" placeholder="Например, напоминание или запись"></label>')
+        saved_texts = {row["key"]: row for row in store.all("SELECT * FROM texts")}
+        for index, (group_name, keys) in enumerate(TEXT_GROUPS.items()):
+            available = [key for key in keys if key in saved_texts]
+            body += f'<details class="settings-group text-group"{" open" if index == 0 else ""}><summary><span>{esc(group_name)}</span><span class="pill">{len(available)} текстов</span></summary><div class="group-body">'
+            for key in available:
+                row = saved_texts[key]
+                variables = re.findall(r"\{([a-z_]+)\}", row["value"])
+                variable_note = (f'<small class="label-note">Сохраните переменные: {", ".join("{" + esc(item) + "}" for item in dict.fromkeys(variables))}</small>'
+                                 if variables else '')
+                body += (f'<article class="text-card" data-search="{esc(TEXT_LABELS[key].lower())}"><form method="post" action="/admin/texts/{quote(key)}">{hidden()}'
+                         f'<label>{esc(TEXT_LABELS[key])}{variable_note}<textarea name="value" rows="4">{esc(row["value"])}</textarea></label>'
+                         '<button>Сохранить текст</button></form></article>')
+            body += '</div></details>'
         return page("Тексты", body)
 
     @app.post("/admin/texts/{key}")
@@ -421,12 +496,12 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             "booking_offer": {"url"},
             "compensation": {"sphere", "value"},
         }.get(key, set())
-        present = {field for _, field, _, _ in string.Formatter().parse(value) if field}
-        if not required.issubset(present):
-            raise HTTPException(400, "Не удаляйте обязательные переменные шаблона")
         # Validate formatting variables against a harmless sample before saving.
-        samples = {name: "пример" for name in ("name", "scores", "paragraph", "sphere", "value", "part", "total", "left", "url")}
+        samples = {name: "пример" for name in ("name", "scores", "paragraph", "sphere", "value", "part", "total", "left", "intro", "url")}
         try:
+            present = {field for _, field, _, _ in string.Formatter().parse(value) if field}
+            if not required.issubset(present):
+                raise HTTPException(400, "Не удаляйте обязательные переменные шаблона")
             value.format(**samples)
         except (KeyError, ValueError, IndexError):
             raise HTTPException(400, "Некорректная переменная в тексте")
@@ -436,10 +511,26 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/rules")
     async def rules(request: Request):
         auth(request)
-        body = f'<article><form method="post" action="/admin/rules">{hidden()}'
-        for row in store.all("SELECT * FROM rules ORDER BY key"):
-            body += f'<label>{esc(row["key"])}<input type="number" min="0" max="10" step="0.25" name="{esc(row["key"])}" value="{row["value"]}" required></label>'
-        body += '<button>Сохранить пороги</button></form></article>'
+        saved = {row["key"]: row["value"] for row in store.all("SELECT * FROM rules")}
+        body = ('<p>Эти числа влияют на текст результата, который получает человек. '
+                'Меняйте их только после проверки тестового прохождения.</p>'
+                f'<article><form class="form-grid" method="post" action="/admin/rules">{hidden()}')
+        groups = (
+            ("Общая картина", ("even_gap", "low_max", "mid_max")),
+            ("Слабые и сильные сферы", ("two_tolerance", "two_gap", "compensation_gap")),
+            ("Бережный результат", ("safety_avg", "safety_score", "safety_count")),
+        )
+        for heading, keys in groups:
+            body += f'<h3 class="wide">{heading}</h3>'
+            for key in keys:
+                if key not in saved:
+                    continue
+                label, help_text = RULE_LABELS[key]
+                maximum = 4 if key == "safety_count" else 10
+                step = "1" if key == "safety_count" else "0.25"
+                body += (f'<label>{esc(label)}<small class="label-note">{esc(help_text)}</small>'
+                         f'<input type="number" min="0" max="{maximum}" step="{step}" name="{key}" value="{saved[key]}" required></label>')
+        body += '<div class="form-actions"><button>Сохранить пороги</button></div></form></article>'
         return page("Пороговые значения", body)
 
     @app.post("/admin/rules")
@@ -447,6 +538,8 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         data = await form(request)
         values = {}
         for row in store.all("SELECT key FROM rules"):
+            if row["key"] not in RULE_LABELS:
+                continue
             try:
                 value = float(data[row["key"]])
             except (KeyError, ValueError, TypeError):
@@ -455,7 +548,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 raise HTTPException(400, "Порог должен быть от 0 до 10")
             values[row["key"]] = value
         if values["low_max"] >= values["mid_max"]:
-            raise HTTPException(400, "low_max должен быть меньше mid_max")
+            raise HTTPException(400, "Граница низкого балла должна быть меньше границы среднего")
         for key, value in values.items():
             store.conn.execute("UPDATE rules SET value=? WHERE key=?", (value, key))
         store.conn.commit()
@@ -464,25 +557,37 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/options")
     async def options(request: Request):
         auth(request)
-        body = f'<article><form method="post" action="/admin/options">{hidden()}'
-        for row in store.all("SELECT * FROM options ORDER BY key"):
-            if row["key"] == "auto_reminders_enabled":
-                continue
-            body += f'<label>{esc(row["key"])}<input name="{esc(row["key"])}" value="{esc(row["value"])}"></label>'
-        body += '<button>Сохранить</button></form></article>'
+        saved = {row["key"]: row["value"] for row in store.all("SELECT * FROM options")}
+        body = ('<p>Здесь настраиваются ссылки и значки. Автоматические напоминания включаются отдельно в разделе «Рассылка».</p>'
+                f'<article><form class="form-grid" method="post" action="/admin/options">{hidden()}')
+        for heading, keys in (("Ссылки", ("booking_url", "contact_url")),
+                              ("Значки сфер", ("emoji_spiritual", "emoji_emotional", "emoji_mental", "emoji_physical"))):
+            body += f'<h3 class="wide">{heading}</h3>'
+            for key in keys:
+                if key not in saved:
+                    continue
+                label, help_text = OPTION_LABELS[key]
+                input_type = "url" if key.endswith("_url") else "text"
+                body += (f'<label>{esc(label)}<small class="label-note">{esc(help_text)}</small>'
+                         f'<input type="{input_type}" name="{key}" value="{esc(saved[key])}"'
+                         f'{" placeholder=\"https://...\"" if input_type == "url" else ""}></label>')
+        body += '<div class="form-actions"><button>Сохранить настройки</button></div></form></article>'
         return page("Настройки", body)
 
     @app.post("/admin/options")
     async def save_options(request: Request):
         data = await form(request)
+        changes = []
         for row in store.all("SELECT key FROM options"):
             key = row["key"]
-            if key == "auto_reminders_enabled":
+            if key == "auto_reminders_enabled" or key not in data:
                 continue
             value = str(data.get(key, "")).strip()[:300]
             if key.endswith("_url") and value and not re.fullmatch(r"https://[^\s]+", value):
                 raise HTTPException(400, "Ссылка должна начинаться с https://")
-            store.set_option(key, value)
+            changes.append((value, key))
+        store.conn.executemany("UPDATE options SET value=? WHERE key=?", changes)
+        store.conn.commit()
         return RedirectResponse("/admin/options", status_code=303)
 
     @app.get("/admin/users")
@@ -542,21 +647,21 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
             LEFT JOIN runs r ON r.id=u.current_run""" + where +
                          f" ORDER BY {sort_sql} LIMIT 500", tuple(params))
         options = ''.join(f'<option value="{value}"{" selected" if username_filter == value else ""}>{label}</option>'
-                          for value, label in (("", "Все"), ("yes", "Есть username"), ("no", "Нет username")))
+                          for value, label in (("", "Все"), ("yes", "Есть имя в Telegram"), ("no", "Нет имени в Telegram")))
         sort_options = ''.join(f'<option value="{value}"{" selected" if sort == value else ""}>{label}</option>'
                                for value, label in (("recent", "Последнее действие: новые"),
                                                     ("oldest", "Последнее действие: старые"),
                                                     ("first", "Первый запуск: новые")))
-        body = (f'<form method="get" action="/admin/users"><label>Поиск по имени, ID или username '
+        body = (f'<form method="get" action="/admin/users"><label>Поиск по имени, ID или имени в Telegram '
                 f'<input name="q" value="{esc(query)}" placeholder="@username"></label>'
-                f'<label>Username <select name="has_username">{options}</select></label>'
+                f'<label>Имя в Telegram <select name="has_username">{options}</select></label>'
                 f'<label>Не активен больше N дней<input type="number" min="1" max="3650" name="inactive_days" value="{esc(inactive_raw)}"></label>'
                 f'<label>Последнее действие с даты<input type="date" name="last_from" value="{esc(last_from)}"></label>'
                 f'<label>По дату<input type="date" name="last_to" value="{esc(last_to)}"></label>'
                 f'<label>Сортировка<select name="sort">{sort_options}</select></label>'
                 '<button>Найти</button> <a href="/admin/users">Сбросить</a></form>'
                 '<p>До 500 пользователей по выбранному фильтру. Время — Asia/Almaty. Запись подтверждайте только после проверки в системе бронирования.</p>'
-                '<div style="overflow-x:auto"><table><tr><th>ID</th><th>Имя</th><th>Username</th><th>Первый запуск</th><th>Последнее действие</th><th>Источник</th><th>Шаг</th><th>Статус</th><th>Напоминания</th><th>Продолжение</th><th>Тест / оплата</th><th>Запись</th></tr>')
+                '<small class="scroll-hint">Остальные столбцы справа. Проведите по таблице влево.</small><div class="table-scroll"><table><tr><th>ID</th><th>Имя</th><th>Username</th><th>Первый запуск</th><th>Последнее действие</th><th>Источник</th><th>Шаг</th><th>Статус</th><th>Напоминания</th><th>Продолжение</th><th>Тест / оплата</th><th>Запись</th></tr>')
         for r in rows:
             booking = esc(local_time(r["booked_at"])) if r["booked_at"] else (f'<form method="post" action="/admin/booked/{r["telegram_id"]}">{hidden()}<button>Подтвердить запись</button></form>' if r["current_run"] else "—")
             username = (r["username"] or "").removeprefix("@")
@@ -644,7 +749,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
         auto_status = "включены" if enabled else "выключены"
         auto_action = "disable" if enabled else "enable"
         auto_button = "Выключить автоматические напоминания" if enabled else "Включить автоматические напоминания"
-        body = (f'<article><h3>Автоматические напоминания: {auto_status}</h3>'
+        body = (f'<article><div class="inline-actions"><h3>Автоматические напоминания</h3><span class="pill {"good" if enabled else "warn"}">{auto_status.capitalize()}</span></div>'
                 '<p>Перед включением отметьте тестовые аккаунты во вкладке «Пользователи» и проверьте тексты. '
                 'После включения бот начнёт отправлять сообщения давно неактивным людям, соблюдая лимит и тихие часы.</p>'
                 f'<form method="post" action="/admin/broadcast/automation">{hidden()}'
@@ -654,7 +759,7 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 f'<article><h3>Разовая рассылка</h3><p>Только тем, кто начал бота и не получил результат. '
                 'Нажмите «Предпросмотр», проверьте число получателей и подтвердите. '
                 'В тихие часы 22:00–09:00 Asia/Almaty отправка ждёт утра.</p>'
-                f'<form method="post" action="/admin/broadcast/preview">{hidden()}'
+                f'<form method="post" action="/admin/broadcast/preview" data-native-submit="true" class="form-grid">{hidden()}'
                 '<label>Группа<select name="group"><option value="welcome">До первой части</option>'
                 '<option value="middle">Части 2–4</option><option value="late">Части 5–7</option>'
                 '<option value="next_series">Подписавшиеся на продолжение</option></select></label>'
@@ -662,12 +767,19 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
                 '<button>Предпросмотр</button></form></article>'
                 '<article><h3>Журнал отправки</h3><p>«Отправлено» означает, что Telegram принял сообщение. '
                 'Факт прочтения Telegram боту не сообщает. «Ответил» означает следующее действие пользователя в боте.</p>'
-                '<div style="overflow-x:auto"><table><tr><th>ID</th><th>Пользователь</th><th>Тип</th><th>Статус</th><th>В очереди</th><th>Отправлено</th><th>Ответил</th><th>Ошибка</th></tr>')
+                '<small class="scroll-hint">Остальные столбцы справа. Проведите по таблице влево.</small><div class="table-scroll"><table><tr><th>ID</th><th>Пользователь</th><th>Тип</th><th>Статус</th><th>В очереди</th><th>Отправлено</th><th>Ответил</th><th>Ошибка</th></tr>')
         for row in recent:
+            username = (row["username"] or "").removeprefix("@")
+            user_name = (f'<a href="https://t.me/{quote(username, safe="")}" target="_blank" rel="noopener noreferrer">@{esc(username)}</a>'
+                         if username else "")
+            status = OUTREACH_STATUS_LABELS.get(row["status"], "Неизвестно")
+            status_class = "good" if row["status"] == "sent" else "danger" if row["status"] in {"blocked", "failed"} else "warn"
             body += (f'<tr><td>{row["id"]}</td><td>{row["telegram_id"]} {esc(row["first_name"])} '
-                     f'{esc(row["username"])}</td><td>{esc(row["kind"])}</td><td>{esc(row["status"])}</td>'
+                     f'{user_name}</td><td>{esc(OUTREACH_KIND_LABELS.get(row["kind"], "Другое"))}</td><td><span class="pill {status_class}">{esc(status)}</span></td>'
                      f'<td>{local_time(row["queued_at"])}</td><td>{local_time(row["sent_at"])}</td>'
-                     f'<td>{local_time(row["response_at"])}</td><td>{esc(row["error"])}</td></tr>')
+                     f'<td>{local_time(row["response_at"])}</td><td>{esc(row["error"] or "—")}</td></tr>')
+        if not recent:
+            body += '<tr><td colspan="8">Отправок пока нет</td></tr>'
         return page("Рассылка", body + '</table></div></article>')
 
     @app.post("/admin/broadcast/automation")
@@ -727,16 +839,16 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     async def reviews(request: Request):
         auth(request)
         media = store.one("SELECT * FROM review_media WHERE id=1")
-        body = (f'<article><p>Кнопка с видео появится после добавления MP4 или публичной HTTPS-ссылки и подтверждения согласия участников. '
+        body = (f'<article><h3>Материалы отзывов</h3><p>Кнопка с видео появится после добавления MP4 или публичной HTTPS-ссылки и подтверждения согласия участников. '
                 'Видео должно быть коротким — 2–3 минуты. Текстовые отзывы показываются только при загруженных изображениях. '
                 'Бот не узнаёт, досмотрел ли человек видео.</p>'
                 f'<form method="post" action="/admin/reviews" enctype="multipart/form-data">{hidden()}'
-                f'<p>Видео: {esc(media["video_path"] or media["video_url"] or "не добавлено")}</p>'
+                f'<p class="file-note">Текущее видео: {esc(Path(media["video_path"]).name if media["video_path"] else media["video_url"] or "не добавлено")}</p>'
                 '<label>MP4-файл до 50 МБ<input type="file" name="video" accept="video/mp4,.mp4"></label>'
                 f'<label>Или публичная HTTPS-ссылка на видео<input name="video_url" value="{esc(media["video_url"])}"></label>'
                 '<label><input type="checkbox" name="remove_video"> Убрать видео</label>')
         for index in range(1, 4):
-            body += (f'<p>Скриншот {index}: {esc(media[f"image{index}_path"] or "не добавлен")}</p>'
+            body += (f'<p class="file-note">Скриншот {index}: {esc(Path(media[f"image{index}_path"]).name if media[f"image{index}_path"] else "не добавлен")}</p>'
                      f'<label>Загрузить PNG/JPEG<input type="file" name="image{index}" accept="image/png,image/jpeg"></label>'
                      f'<label><input type="checkbox" name="remove_image{index}"> Убрать скриншот {index}</label>')
         body += (f'<label><input type="checkbox" name="consent_confirmed" {"checked" if media["consent_confirmed"] else ""}> '
@@ -800,8 +912,10 @@ def create_admin(store: Store, config: Settings) -> FastAPI:
     @app.get("/admin/export")
     async def exports(request: Request):
         auth(request)
-        links = ''.join(f'<li><a href="/admin/export/{table}.csv">{table}.csv</a></li>' for table in ("users", "runs", "scores", "events", "answers", "lead_magnets", "outreach", "campaigns", "survey_answers"))
-        return page("Выгрузка", f'<article><ul>{links}<li><a href="/admin/backup.sqlite3">Полная резервная копия SQLite</a></li></ul></article>')
+        links = ''.join(f'<a class="export-item" href="/admin/export/{table}.csv" download><span>{esc(EXPORT_LABELS[table])}</span><span aria-hidden="true">↓</span></a>'
+                        for table in EXPORT_LABELS)
+        links += '<a class="export-item" href="/admin/backup.sqlite3" download><span>Полная резервная копия</span><span aria-hidden="true">↓</span></a>'
+        return page("Выгрузка", f'<article><h3>Скачать данные</h3><p>Выберите нужный раздел. Таблицы загружаются в формате CSV, резервная копия — в формате SQLite.</p><div class="export-grid">{links}</div></article>')
 
     @app.get("/admin/export/{table}.csv")
     async def export_csv(table: str, request: Request):

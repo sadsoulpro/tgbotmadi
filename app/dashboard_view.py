@@ -29,11 +29,11 @@ def render_dashboard(store: Store, period: str, start, end, start_raw: str, end_
         body += f'<tr><td>{label}</td><td>{totals[key]}</td></tr>'
     body += '</table></article>'
     headers = ''.join(f'<th>{escape(label)}</th>' for _, label in METRICS)
-    body += f'<article><h3>По источникам</h3><table><tr><th>Метка</th>{headers}</tr>'
+    body += f'<article><h3>По источникам</h3><small class="scroll-hint">Остальные столбцы справа. Проведите по таблице влево.</small><table><tr><th>Метка</th>{headers}</tr>'
     for source, counts in sorted(sources.items(), key=lambda row: (-row[1]["starts"], row[0])):
         body += f'<tr><td>{escape(source)}</td>' + ''.join(f'<td>{counts[key]}</td>' for key, _ in METRICS) + '</tr>'
     body += '</table></article>'
-    body += f'<article><h3>По месяцам</h3><table><tr><th>Месяц первого запуска</th>{headers}</tr>'
+    body += f'<article><h3>По месяцам</h3><small class="scroll-hint">Остальные столбцы справа. Проведите по таблице влево.</small><table><tr><th>Месяц первого запуска</th>{headers}</tr>'
     for month, counts in sorted(months.items(), reverse=True):
         body += f'<tr><td>{month}</td>' + ''.join(f'<td>{counts[key]}</td>' for key, _ in METRICS) + '</tr>'
     body += '</table></article>'
